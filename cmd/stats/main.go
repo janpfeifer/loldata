@@ -14,59 +14,67 @@ import (
 )
 
 var (
-	oeFilesFlag = flag.String("oe", "", "Comma-separated list of Oracle's Elixir CSV file paths or glob patterns")
+	oeFilesFlag   = flag.String("oe", "", "Comma-separated list of Oracle's Elixir CSV file paths or glob patterns")
+	jsonFilesFlag = flag.String("json", "", "Comma-separated list of dataset JSON file paths or glob patterns")
+	saveJSONFlag  = flag.String("save-json", "", "Save the loaded dataset to this JSON file")
 )
+
+type loadTask struct {
+	path   string
+	isJSON bool
+}
 
 func main() {
 	flag.Parse()
 
-	var filePaths []string
+	var tasks []loadTask
+
+	expandPaths := func(pattern string) []string {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			return nil
+		}
+		if strings.HasPrefix(pattern, "~/") {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				pattern = filepath.Join(home, pattern[2:])
+			}
+		}
+		matches, err := filepath.Glob(pattern)
+		if err == nil && len(matches) > 0 {
+			return matches
+		}
+		return []string{pattern}
+	}
 
 	// Process -oe flag
 	if *oeFilesFlag != "" {
 		for _, part := range strings.Split(*oeFilesFlag, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
+			for _, p := range expandPaths(part) {
+				tasks = append(tasks, loadTask{path: p, isJSON: false})
 			}
-			// Handle ~ expansion if needed
-			if strings.HasPrefix(part, "~/") {
-				home, err := os.UserHomeDir()
-				if err == nil {
-					part = filepath.Join(home, part[2:])
-				}
-			}
-			matches, err := filepath.Glob(part)
-			if err == nil && len(matches) > 0 {
-				filePaths = append(filePaths, matches...)
-			} else {
-				filePaths = append(filePaths, part)
+		}
+	}
+
+	// Process -json flag
+	if *jsonFilesFlag != "" {
+		for _, part := range strings.Split(*jsonFilesFlag, ",") {
+			for _, p := range expandPaths(part) {
+				tasks = append(tasks, loadTask{path: p, isJSON: true})
 			}
 		}
 	}
 
 	// Also support positional arguments
 	for _, arg := range flag.Args() {
-		arg = strings.TrimSpace(arg)
-		if arg == "" {
-			continue
-		}
-		if strings.HasPrefix(arg, "~/") {
-			home, err := os.UserHomeDir()
-			if err == nil {
-				arg = filepath.Join(home, arg[2:])
-			}
-		}
-		matches, err := filepath.Glob(arg)
-		if err == nil && len(matches) > 0 {
-			filePaths = append(filePaths, matches...)
-		} else {
-			filePaths = append(filePaths, arg)
+		for _, p := range expandPaths(arg) {
+			isJSON := strings.HasSuffix(strings.ToLower(p), ".json")
+			tasks = append(tasks, loadTask{path: p, isJSON: isJSON})
 		}
 	}
 
-	if len(filePaths) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: %s -oe <oracles_elixir.csv[,file2.csv,...]>\n\n", os.Args[0])
+	if len(tasks) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-oe <oracles_elixir.csv>] [-json <dataset.json>] [-save-json <out.json>] [files...]\n\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -74,16 +82,40 @@ func main() {
 	dataset := data.NewDataset()
 	startTime := time.Now()
 
-	for _, path := range filePaths {
-		fmt.Printf("Loading Oracle's Elixir CSV: %s ...\n", path)
-		if err := dataset.LoadOraclesElixir(path); err != nil {
-			fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", path, err)
-			os.Exit(1)
+	for _, task := range tasks {
+		if task.isJSON {
+			fmt.Printf("Loading Dataset JSON: %s ...\n", task.path)
+			if err := dataset.LoadFromJSON(task.path); err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", task.path, err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Printf("Loading Oracle's Elixir CSV: %s ...\n", task.path)
+			if err := dataset.LoadOraclesElixir(task.path); err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", task.path, err)
+				os.Exit(1)
+			}
 		}
 	}
 
 	loadDuration := time.Since(startTime)
 	fmt.Printf("Loaded in %v\n\n", loadDuration)
+
+	if *saveJSONFlag != "" {
+		savePath := *saveJSONFlag
+		if strings.HasPrefix(savePath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				savePath = filepath.Join(home, savePath[2:])
+			}
+		}
+		fmt.Printf("Saving dataset to JSON: %s ...\n", savePath)
+		saveStart := time.Now()
+		if err := dataset.SaveToJSON(savePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving JSON to %q: %v\n", savePath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Saved in %v\n\n", time.Since(saveStart))
+	}
 
 	printStats(dataset)
 }

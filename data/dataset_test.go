@@ -205,3 +205,144 @@ func TestLoadOraclesElixirSample(t *testing.T) {
 		}
 	}
 }
+
+func TestDatasetSaveAndLoadJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonPath := filepath.Join(tmpDir, "dataset.json")
+
+	ds := data.NewDataset()
+
+	// Register a standalone summoner (without match yet)
+	sStandalone := ds.GetOrCreateSummoner("solo_player", "SoloPlayer")
+	sStandalone.SummonerLevel = 42
+
+	// Create matches
+	m1 := &data.MatchV5{
+		Metadata: data.MetadataDto{
+			MatchID: "MATCH_001",
+		},
+		Info: data.InfoDto{
+			GameStartTimestamp: time.Date(2025, 2, 1, 12, 0, 0, 0, time.UTC).UnixMilli(),
+			GameDuration:       1900,
+			Participants: []*data.ParticipantDto{
+				{
+					PUUID:         "p1",
+					SummonerName:  "PlayerOne",
+					ParticipantID: 1,
+					TeamID:        100,
+					Kills:         5,
+				},
+				{
+					PUUID:         "p2",
+					SummonerName:  "PlayerTwo",
+					ParticipantID: 2,
+					TeamID:        200,
+					Kills:         2,
+				},
+			},
+			Teams: []*data.TeamDto{
+				{TeamID: 100, Win: true},
+				{TeamID: 200, Win: false},
+			},
+		},
+	}
+
+	m2 := &data.MatchV5{
+		Metadata: data.MetadataDto{
+			MatchID: "MATCH_002",
+		},
+		Info: data.InfoDto{
+			GameStartTimestamp: time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC).UnixMilli(),
+			GameDuration:       2100,
+			Participants: []*data.ParticipantDto{
+				{
+					PUUID:         "p1",
+					SummonerName:  "PlayerOne",
+					ParticipantID: 1,
+					TeamID:        100,
+					Kills:         10,
+				},
+			},
+			Teams: []*data.TeamDto{
+				{TeamID: 100, Win: true},
+			},
+		},
+	}
+
+	ds.AddMatch(m1)
+	ds.AddMatch(m2)
+
+	// Save to JSON
+	if err := ds.SaveToJSON(jsonPath); err != nil {
+		t.Fatalf("SaveToJSON failed: %v", err)
+	}
+
+	// Verify file was written and is not empty
+	stat, err := os.Stat(jsonPath)
+	if err != nil {
+		t.Fatalf("failed to stat written JSON file: %v", err)
+	}
+	if stat.Size() == 0 {
+		t.Fatalf("saved JSON file is empty")
+	}
+
+	// Load into a new Dataset
+	loaded := data.NewDataset()
+	if err := loaded.LoadFromJSON(jsonPath); err != nil {
+		t.Fatalf("LoadFromJSON failed: %v", err)
+	}
+
+	// Verify counts
+	if len(loaded.Matches) != 2 {
+		t.Fatalf("expected 2 matches in loaded dataset, got %d", len(loaded.Matches))
+	}
+	if len(loaded.Summoners) != 3 { // p1, p2, solo_player
+		t.Fatalf("expected 3 summoners in loaded dataset, got %d", len(loaded.Summoners))
+	}
+
+	// Verify lookup maps
+	p1 := loaded.GetSummoner("p1")
+	if p1 == nil {
+		t.Fatalf("GetSummoner('p1') returned nil")
+	}
+	if p1.Name != "PlayerOne" {
+		t.Errorf("expected summoner name 'PlayerOne', got %q", p1.Name)
+	}
+	if len(p1.Matches) != 2 {
+		t.Fatalf("expected 2 matches for p1, got %d", len(p1.Matches))
+	}
+
+	// Chronological order: MATCH_002 is earlier than MATCH_001
+	if p1.Matches[0].Metadata.MatchID != "MATCH_002" {
+		t.Errorf("expected first match to be MATCH_002, got %s", p1.Matches[0].Metadata.MatchID)
+	}
+	if p1.Matches[1].Metadata.MatchID != "MATCH_001" {
+		t.Errorf("expected second match to be MATCH_001, got %s", p1.Matches[1].Metadata.MatchID)
+	}
+
+	// Verify participant bidirectional pointer
+	match1 := loaded.GetMatch("MATCH_001")
+	if match1 == nil {
+		t.Fatalf("GetMatch('MATCH_001') returned nil")
+	}
+	part1 := match1.GetParticipantByPUUID("p1")
+	if part1 == nil {
+		t.Fatalf("participant p1 not found in match1")
+	}
+	if part1.Summoner != p1 {
+		t.Errorf("expected participant.Summoner to match p1 pointer")
+	}
+
+	// Verify standalone summoner
+	solo := loaded.GetSummoner("solo_player")
+	if solo == nil {
+		t.Fatalf("standalone summoner 'solo_player' not found")
+	}
+	if solo.SummonerLevel != 42 {
+		t.Errorf("expected summonerLevel 42, got %d", solo.SummonerLevel)
+	}
+	if len(solo.Matches) != 0 {
+		t.Errorf("expected 0 matches for solo_player, got %d", len(solo.Matches))
+	}
+}
+

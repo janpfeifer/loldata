@@ -60,6 +60,12 @@ loldata/
   - `PUUIDToSummoner map[string]*SummonerV4`
   - `MatchIDToMatch map[string]*MatchV5`
 - **`Dataset.AddMatch(m *MatchV5)`**: Registers match, resolves or creates participant summoners, and establishes bidirectional links.
+- **`Dataset.SaveToJSON(filePath string) error`**: Serializes matches and summoners to a JSON file.
+- **`Dataset.LoadFromJSON(filePath string) error`**: Deserializes matches and summoners from a JSON file, reconstructing indexes and bidirectional links.
+- **`Dataset.LoadOraclesElixir(csvFilePath string) error`**:
+  - Reads CSV files from Oracle's Elixir.
+  - Groups 12 rows sharing the same `gameid` (10 player rows + 2 team rows) into a single `MatchV5` instance.
+  - Fallback logic: if `playerid` is empty in the CSV, uses `playername` as the PUUID key.
 
 ### `data/oracles_elixir.go`
 - **`Dataset.LoadOraclesElixir(csvFilePath string) error`**:
