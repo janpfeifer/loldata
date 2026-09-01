@@ -16,6 +16,8 @@ type CrawlerConfig struct {
 	MaxMatches         int
 	CheckpointDuration time.Duration
 	Verbose            bool
+	SeedPUUID          string
+	Refresh            bool
 }
 
 // MatchCrawler coordinates crawling matches and summoners from Riot API.
@@ -44,17 +46,43 @@ func NewMatchCrawler(client *RiotClient, dataset *data.Dataset, store *DatasetSt
 		visitedPUUIDs: make(map[string]bool),
 	}
 
-	// Pre-populate queue from existing dataset summoners
+	// If Refresh is enabled, mark all summoners in the dataset as uncrawled so they are re-queued.
+	if cfg.Refresh {
+		for _, s := range dataset.Summoners {
+			if s != nil {
+				s.Crawled = false
+			}
+		}
+	}
+
+	// 1. If seed PUUID is provided, always enqueue it first at startup (even if already crawled)
+	// to check for any new matches in the specified time window.
+	if cfg.SeedPUUID != "" {
+		crawler.queuedPUUIDs[cfg.SeedPUUID] = true
+		crawler.puuidQueue = append(crawler.puuidQueue, cfg.SeedPUUID)
+	}
+
+	// 2. Pre-populate queue from existing dataset summoners that have not yet been crawled.
 	for _, s := range dataset.Summoners {
-		if s != nil && s.PUUID != "" {
-			crawler.EnqueuePUUID(s.PUUID)
+		if s == nil || s.PUUID == "" {
+			continue
+		}
+		if s.PUUID == cfg.SeedPUUID {
+			continue
+		}
+		if s.Crawled {
+			crawler.visitedPUUIDs[s.PUUID] = true
+		} else {
+			crawler.queuedPUUIDs[s.PUUID] = true
+			crawler.puuidQueue = append(crawler.puuidQueue, s.PUUID)
 		}
 	}
 
 	return crawler
 }
 
-// EnqueuePUUID adds a PUUID to the crawl queue if not already queued or visited.
+// EnqueuePUUID adds a PUUID to the crawl queue if not already queued or visited,
+// and not already marked as crawled in the dataset.
 func (c *MatchCrawler) EnqueuePUUID(puuid string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -62,8 +90,34 @@ func (c *MatchCrawler) EnqueuePUUID(puuid string) {
 	if puuid == "" || c.queuedPUUIDs[puuid] || c.visitedPUUIDs[puuid] {
 		return
 	}
+	if s := c.dataset.GetSummoner(puuid); s != nil && s.Crawled {
+		c.visitedPUUIDs[puuid] = true
+		return
+	}
 	c.queuedPUUIDs[puuid] = true
 	c.puuidQueue = append(c.puuidQueue, puuid)
+}
+
+// ReenqueueSeed adds the seed PUUID to the front of the crawl queue,
+// even if it was previously visited or marked as crawled.
+func (c *MatchCrawler) ReenqueueSeed(puuid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if puuid == "" {
+		return
+	}
+	delete(c.visitedPUUIDs, puuid)
+
+	newQueue := make([]string, 0, len(c.puuidQueue)+1)
+	newQueue = append(newQueue, puuid)
+	for _, q := range c.puuidQueue {
+		if q != puuid {
+			newQueue = append(newQueue, q)
+		}
+	}
+	c.puuidQueue = newQueue
+	c.queuedPUUIDs[puuid] = true
 }
 
 // QueueSize returns the number of pending summoners in the queue.
@@ -78,6 +132,30 @@ func (c *MatchCrawler) CrawledMatchesCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.crawledMatchesCount
+}
+
+func applySummonerProfile(target, src *data.SummonerV4) {
+	if target == nil || src == nil {
+		return
+	}
+	if target.Name == "" && src.Name != "" {
+		target.Name = src.Name
+	}
+	if target.SummonerLevel == 0 && src.SummonerLevel != 0 {
+		target.SummonerLevel = src.SummonerLevel
+	}
+	if target.AccountID == "" && src.AccountID != "" {
+		target.AccountID = src.AccountID
+	}
+	if target.ID == "" && src.ID != "" {
+		target.ID = src.ID
+	}
+	if target.ProfileIconID == 0 && src.ProfileIconID != 0 {
+		target.ProfileIconID = src.ProfileIconID
+	}
+	if target.RevisionDate == 0 && src.RevisionDate != 0 {
+		target.RevisionDate = src.RevisionDate
+	}
 }
 
 // Run executes the crawler until the queue is exhausted, target max matches is reached, or ctx is canceled.
@@ -96,11 +174,12 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 					c.mu.Lock()
 					matches := len(c.dataset.Matches)
 					summoners := len(c.dataset.Summoners)
+					err := c.store.Save(c.dataset)
 					c.mu.Unlock()
 
 					fmt.Printf("[Checkpoint] Saving dataset (%d matches, %d summoners) to %s ...\n",
 						matches, summoners, c.store.FilePath())
-					if err := c.store.Save(c.dataset); err != nil {
+					if err != nil {
 						fmt.Printf("[Checkpoint Error] Failed to save dataset: %v\n", err)
 					} else {
 						fmt.Printf("[Checkpoint] Saved successfully.\n")
@@ -151,29 +230,21 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		c.mu.Unlock()
 
 		// Fetch summoner profile if not fully populated
+		c.mu.Lock()
 		summoner := c.dataset.GetSummoner(puuid)
-		if summoner == nil || summoner.Name == "" || summoner.SummonerLevel == 0 {
+		needProfile := (summoner == nil || summoner.Name == "" || summoner.SummonerLevel == 0)
+		c.mu.Unlock()
+
+		var summonerProfile *data.SummonerV4
+		if needProfile {
 			if s, err := c.client.GetSummonerByPUUID(ctx, puuid); err == nil && s != nil {
-				existing := c.dataset.GetOrCreateSummoner(puuid, s.Name)
-				if s.Name != "" {
-					existing.Name = s.Name
-				}
-				if s.SummonerLevel != 0 {
-					existing.SummonerLevel = s.SummonerLevel
-				}
-				if s.AccountID != "" {
-					existing.AccountID = s.AccountID
-				}
-				if s.ID != "" {
-					existing.ID = s.ID
-				}
-				if s.ProfileIconID != 0 {
-					existing.ProfileIconID = s.ProfileIconID
-				}
+				summonerProfile = s
+			} else if ctx.Err() != nil {
+				return ctx.Err()
 			}
 		}
 
-		// Fetch match IDs for this summoner
+		// Fetch match IDs for this summoner (always with count=100)
 		matchIDs, err := c.client.GetMatchIDsByPUUID(ctx, puuid, c.cfg.StartTime, c.cfg.EndTime, 0)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -184,20 +255,41 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		}
 
 		if len(matchIDs) == 0 {
+			c.mu.Lock()
+			s := c.dataset.GetOrCreateSummoner(puuid, "")
+			if summonerProfile != nil {
+				applySummonerProfile(s, summonerProfile)
+			}
+			s.Crawled = true
 			displayName := puuid
-			if s := c.dataset.GetSummoner(puuid); s != nil && s.Name != "" {
+			if s.Name != "" {
 				displayName = fmt.Sprintf("%s (%s)", s.Name, puuid)
 			}
-			fmt.Printf("[Summoner] %s: 0 matches found in time window\n", displayName)
-		} else if c.cfg.Verbose {
-			displayName := puuid
-			if s := c.dataset.GetSummoner(puuid); s != nil && s.Name != "" {
-				displayName = fmt.Sprintf("%s (%s)", s.Name, puuid)
-			}
-			fmt.Printf("[Summoner] %s found %d matches in window\n", displayName, len(matchIDs))
+			totalMatches := len(c.dataset.Matches)
+			totalSummoners := len(c.dataset.Summoners)
+			queueSize := len(c.puuidQueue)
+			c.mu.Unlock()
+
+			fmt.Printf("[Summoner] %s: 0 matches found in time window | Dataset: %d matches, %d players | Queue: %d\n",
+				displayName, totalMatches, totalSummoners, queueSize)
+			continue
 		}
 
-		// Process each match
+		if c.cfg.Verbose {
+			c.mu.Lock()
+			displayName := puuid
+			if s := c.dataset.GetSummoner(puuid); s != nil && s.Name != "" {
+				displayName = fmt.Sprintf("%s (%s)", s.Name, puuid)
+			}
+			c.mu.Unlock()
+			fmt.Printf("[Summoner] %s found %d matches in window. Downloading matches...\n", displayName, len(matchIDs))
+		}
+
+		// Prioritize fully crawling all matches of this summoner before atomically adding to dataset
+		var fetchedMatches []*data.MatchV5
+		var alreadyPresentMatches []*data.MatchV5
+		fetchFailed := false
+
 		for _, matchID := range matchIDs {
 			select {
 			case <-ctx.Done():
@@ -205,12 +297,13 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			default:
 			}
 
-			if c.cfg.MaxMatches > 0 && c.CrawledMatchesCount() >= c.cfg.MaxMatches {
-				break
-			}
-
 			// Check if match is already loaded in dataset
-			if c.dataset.GetMatch(matchID) != nil {
+			c.mu.Lock()
+			existingMatch := c.dataset.GetMatch(matchID)
+			c.mu.Unlock()
+
+			if existingMatch != nil {
+				alreadyPresentMatches = append(alreadyPresentMatches, existingMatch)
 				continue
 			}
 
@@ -219,42 +312,79 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				fmt.Printf("[Error] Failed fetching match %s: %v\n", matchID, err)
-				continue
+				fmt.Printf("[Error] Failed fetching match %s for summoner %s: %v\n", matchID, puuid, err)
+				fetchFailed = true
+				break
 			}
 			if match == nil {
 				continue
 			}
 
-			// Add match to dataset (registers participants and bidirectional links)
+			fetchedMatches = append(fetchedMatches, match)
+		}
+
+		if fetchFailed {
+			// If we failed to crawl all matches for this summoner, do not add partial matches
+			// and do not mark as crawled, so the summoner can be crawled cleanly on retry/restart.
+			continue
+		}
+
+		// Atomically add matches to dataset, mark summoner as crawled, and enqueue new participants
+		c.mu.Lock()
+		s := c.dataset.GetOrCreateSummoner(puuid, "")
+		if summonerProfile != nil {
+			applySummonerProfile(s, summonerProfile)
+		}
+
+		countBefore := c.crawledMatchesCount
+		for _, match := range fetchedMatches {
 			c.dataset.AddMatch(match)
+		}
+		s.Crawled = true
+		c.crawledMatchesCount += len(fetchedMatches)
 
-			c.mu.Lock()
-			c.crawledMatchesCount++
-			count := c.crawledMatchesCount
-			totalMatches := len(c.dataset.Matches)
-			totalSummoners := len(c.dataset.Summoners)
-			c.mu.Unlock()
-
-			// Enqueue new participants
-			newParticipants := 0
-			for _, p := range match.Info.Participants {
-				if p != nil && p.PUUID != "" {
-					c.mu.Lock()
-					if !c.visitedPUUIDs[p.PUUID] && !c.queuedPUUIDs[p.PUUID] {
-						c.queuedPUUIDs[p.PUUID] = true
-						c.puuidQueue = append(c.puuidQueue, p.PUUID)
-						newParticipants++
-					}
-					c.mu.Unlock()
+		// Enqueue other participants from all matches of this summoner (both new and already present)
+		// that have not been enqueued or crawled yet.
+		newParticipants := 0
+		allMatches := append(alreadyPresentMatches, fetchedMatches...)
+		for _, m := range allMatches {
+			for _, p := range m.Info.Participants {
+				if p == nil || p.PUUID == "" {
+					continue
 				}
+				pPUUID := p.PUUID
+				if c.visitedPUUIDs[pPUUID] || c.queuedPUUIDs[pPUUID] {
+					continue
+				}
+				pSummoner := c.dataset.GetSummoner(pPUUID)
+				if pSummoner != nil && pSummoner.Crawled {
+					c.visitedPUUIDs[pPUUID] = true
+					continue
+				}
+				c.queuedPUUIDs[pPUUID] = true
+				c.puuidQueue = append(c.puuidQueue, pPUUID)
+				newParticipants++
 			}
+		}
 
+		displayName := puuid
+		if s.Name != "" {
+			displayName = fmt.Sprintf("%s (%s)", s.Name, puuid)
+		}
+		totalMatches := len(c.dataset.Matches)
+		totalSummoners := len(c.dataset.Summoners)
+		queueSize := len(c.puuidQueue)
+		c.mu.Unlock()
+
+		for i, match := range fetchedMatches {
 			matchTime := match.Time()
 			duration := match.Duration()
-			fmt.Printf("[+Match #%d] %s (%s, %v) | Dataset: %d matches, %d players | Queue: %d (+%d)\n",
-				count, matchID, matchTime.Format("2006-01-02 15:04"), duration, totalMatches, totalSummoners, c.QueueSize(), newParticipants)
+			fmt.Printf("  [+Match #%d] %s (%s, %v)\n",
+				countBefore+i+1, match.Metadata.MatchID, matchTime.Format("2006-01-02 15:04"), duration)
 		}
+
+		fmt.Printf("[Summoner] %s: crawled %d matches (%d new) | Dataset: %d matches, %d players | Queue: %d (+%d)\n",
+			displayName, len(allMatches), len(fetchedMatches), totalMatches, totalSummoners, queueSize, newParticipants)
 	}
 
 	return nil

@@ -353,11 +353,15 @@ func (c *RiotClient) GetSummonerByPUUID(ctx context.Context, puuid string) (*dat
 	return &summoner, nil
 }
 
+// MaxMatchIDsCount is the maximum page count allowed by Riot API for match IDs list (count=100).
+const MaxMatchIDsCount = 100
+
 // GetMatchIDsByPUUID retrieves a list of match IDs for a player within [startTime, endTime].
+// Always requests using the maximum count (=100) to minimize the number of HTTP requests.
 func (c *RiotClient) GetMatchIDsByPUUID(ctx context.Context, puuid string, startTime, endTime time.Time, maxMatches int) ([]string, error) {
 	var matchIDs []string
 	startIdx := 0
-	pageSize := 100
+	pageSize := MaxMatchIDsCount
 
 	for {
 		params := url.Values{}

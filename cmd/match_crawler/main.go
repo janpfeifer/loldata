@@ -26,6 +26,7 @@ var (
 	apiKeyFlag        = flag.String("api_key", "", "Riot API Key (defaults to RIOT_API_KEY or RIOT_TOKEN environment variable)")
 	platformFlag      = flag.String("platform", "na1", "Riot platform routing (e.g. 'na1', 'euw1', 'kr', 'br1', etc.)")
 	maxMatchesFlag    = flag.Int("max_matches", 0, "Maximum number of new matches to crawl (0 for unlimited)")
+	refreshFlag       = flag.Bool("refresh", false, "Mark all loaded summoners as uncrawled at startup to re-crawl their match histories")
 	verboseFlag       = flag.Bool("verbose", false, "Enable verbose debug output")
 )
 
@@ -107,17 +108,7 @@ func main() {
 		}
 	}
 
-	// 6. Setup Crawler
-	crawlerCfg := CrawlerConfig{
-		StartTime:          startTime,
-		EndTime:            endTime,
-		MaxMatches:         *maxMatchesFlag,
-		CheckpointDuration: *checkpointsFlag,
-		Verbose:            *verboseFlag,
-	}
-	crawler := NewMatchCrawler(client, dataset, store, crawlerCfg)
-
-	// 7. Context with signal cancellation
+	// 6. Context with signal cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -129,22 +120,41 @@ func main() {
 		cancel()
 	}()
 
-	// 8. Resolve seed if provided
+	// 7. Resolve seed if provided
+	var seedPUUID string
 	if *seedFlag != "" {
 		fmt.Printf("Resolving seed summoner %q on platform %s ...\n", *seedFlag, *platformFlag)
-		puuid, err := client.ResolveSeedToPUUID(ctx, *seedFlag)
+		var err error
+		seedPUUID, err = client.ResolveSeedToPUUID(ctx, *seedFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving seed %q: %v\n", *seedFlag, err)
 			os.Exit(1)
 		}
-		fmt.Printf("Resolved seed %q -> PUUID: %s\n", *seedFlag, puuid)
-		crawler.EnqueuePUUID(puuid)
+		fmt.Printf("Resolved seed %q -> PUUID: %s\n", *seedFlag, seedPUUID)
 	}
 
-	if crawler.QueueSize() == 0 && len(dataset.Matches) == 0 {
-		fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
-		flag.PrintDefaults()
-		os.Exit(1)
+	// 8. Setup Crawler
+	crawlerCfg := CrawlerConfig{
+		StartTime:          startTime,
+		EndTime:            endTime,
+		MaxMatches:         *maxMatchesFlag,
+		CheckpointDuration: *checkpointsFlag,
+		Verbose:            *verboseFlag,
+		SeedPUUID:          seedPUUID,
+		Refresh:            *refreshFlag,
+	}
+	crawler := NewMatchCrawler(client, dataset, store, crawlerCfg)
+
+	if crawler.QueueSize() == 0 {
+		if len(dataset.Matches) == 0 {
+			fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
+			flag.PrintDefaults()
+			os.Exit(1)
+		}
+		fmt.Printf("Dataset loaded (%d matches, %d summoners). All summoners have already been crawled.\n",
+			len(dataset.Matches), len(dataset.Summoners))
+		fmt.Println("To check for new matches or discover new summoners, specify a seed summoner using -seed.")
+		return
 	}
 
 	// 9. Run crawler
