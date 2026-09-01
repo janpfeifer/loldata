@@ -54,28 +54,42 @@ go run ./cmd/match_crawler \
 
 ## Command-Line Tool: `cmd/stats`
 
-`cmd/stats` is a CLI tool to load Oracle's Elixir CSV datasets and compute dataset-wide statistics, player activity distributions, and match summaries.
+`cmd/stats` is a CLI tool to load Oracle's Elixir CSV or JSON datasets and compute dataset-wide statistics or detailed individual summoner statistics.
 
 ### Running the Tool
 
-You can run `cmd/stats` by passing CSV file paths via the `-oe` flag or as positional arguments (glob patterns and comma-separated lists are supported):
+You can run `cmd/stats` by passing JSON dataset files or CSV file paths via flags or positional arguments:
 
 ```bash
-# Using the -oe flag
+# General dataset statistics from JSON or CSV
+go run ./cmd/stats -json ./dataset.json
 go run ./cmd/stats -oe ~/work/lol/2025_LoL_esports_match_data_from_OraclesElixir.csv
 
-# Passing multiple files (comma-separated or multiple arguments)
-go run ./cmd/stats -oe file1.csv,file2.csv
-go run ./cmd/stats ~/work/lol/*.csv
+# Individual summoner performance & champion distribution statistics
+go run ./cmd/stats -json ./dataset.json -summoner "LuckyShott#1114"
+go run ./cmd/stats -json ./dataset.json -summoner "Faker"
 ```
 
 ### Statistics Provided
 
+#### 1. General Dataset Statistics
 - **Total Matches and Players**: Aggregated count of unique games and summoners.
 - **Matches per Player Distribution & Quantiles**: Min, 10th percentile, 25th percentile (Q1), Median (50th percentile), 75th percentile (Q3), 90th percentile, 95th percentile, 99th percentile, Max, and Mean.
 - **Top 10 Most Active Players**: Players with the highest number of recorded matches and their PUUIDs.
 - **Match Metadata & Durations**: Date range of matches, duration statistics (Min, Average, Median, Max), and Blue vs. Red side win rates.
 - **Top Leagues**: Distribution of matches across competitive leagues (LPL, LCK, LEC, LCS, etc.).
+
+#### 2. Summoner Statistics (`-summoner <name|puuid>`)
+- **Overall Performance & Win Ratio**: Total games, wins, losses, win rate percentage, and Blue vs. Red side win rates.
+- **Combat & KDA**: Average kills/deaths/assists, KDA ratio, kill participation (KP%), multikills (doubles, triples, quadras, pentas), First Blood (kills, assists, victims), and First Tower stats.
+- **Farming, Economy & Damage**: Average CS, CS per minute (CSPM), average gold, gold per minute (GPM), average champion damage, damage per minute (DPM), damage share, damage taken, and turret damage.
+- **Vision Metrics**: Average vision score, vision score per minute (VSPM), wards placed, wards cleared, and control wards.
+- **Position / Role Distribution**: Frequency, percentage share of matches, record, win rate, KDA, CSPM, and DPM per position (highlighting most played role).
+- **Champions Played Distribution**: Comprehensive champion pool breakdown sorted by games played with percentage share of matches, win rate, KDA, CSPM, and DPM (highlighting most played champion).
+- **Most Frequent Teammates / Duo Partners**: Most frequent teammates played with, percentage of matches played together, record, and duo win rates.
+- **Most Frequent Opponents**: Frequent rivals and win rates against them.
+- **Game Modes & Queues**: Performance breakdown across Ranked Solo/Duo, Ranked Flex, Normal Draft, ARAM, etc.
+- **Recent Match History**: Last 10 matches summary (Date, Result, Champion, Role, KDA, Duration, Match ID).
 
 > **Note on CSV Row Count vs. Match Count**:
 > In Oracle's Elixir match exports, each game is recorded across **12 rows**:

@@ -104,15 +104,11 @@ loldata/
   - `-platform`: Platform routing (default `na1`).
 
 ### `cmd/stats/main.go`
-- Accepts `-oe <files>` or positional arguments.
-- Loads Oracle's Elixir CSV data into `data.Dataset`.
+- Accepts `-oe <files>`, `-json <files>`, `-summoner <name|puuid>`, `-save-json <out.json>` or positional arguments.
+- Loads Oracle's Elixir CSV or JSON dataset into `data.Dataset`.
 - Computes and prints:
-  - Total match and player counts.
-  - Matches-per-player quantiles (Min, p10, p25, p50/Median, p75, p90, p95, p99, Max, Mean).
-  - Top 10 most active players.
-  - Match duration stats (Min, Avg, Median, Max).
-  - Blue vs Red win rates.
-  - League distribution.
+  - Dataset-wide statistics: matches/players count, matches-per-player quantiles (Min, p10..p99, Max, Mean), top 10 most active players, duration stats, Blue vs Red win rates, and league distribution.
+  - Individual summoner statistics (`-summoner`): overall record & win rates (including Blue/Red split), combat & KDA, kill participation, multikills, first blood/tower stats, CS/CSPM, Gold/GPM, damage metrics (DPM, turret damage, damage taken/mitigated), vision metrics (VSPM, wards placed/cleared/control), role/position distribution, champion pool distribution with % share and win rate, top teammates/duo partners with % share and win rates, opponents, game modes/queues, and recent match history.
 
 ---
 
