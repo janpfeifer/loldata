@@ -166,13 +166,17 @@ func main() {
 	// 10. Save dataset at exit
 	if store != nil && store.FilePath() != "" {
 		fmt.Println("----------------------------------------------------------")
-		fmt.Printf("Saving final dataset (%d matches, %d summoners) to %s ...\n",
-			len(dataset.Matches), len(dataset.Summoners), store.FilePath())
-		if err := store.Save(dataset); err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
-			os.Exit(1)
+		if !dataset.Saved {
+			fmt.Printf("Saving final dataset (%d matches, %d summoners) to %s ...\n",
+				len(dataset.Matches), len(dataset.Summoners), store.FilePath())
+			if err := store.Save(dataset); err != nil {
+				fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Dataset saved successfully.\n")
+		} else {
+			fmt.Printf("Dataset is already up to date on disk (%s). No changes to save.\n", store.FilePath())
 		}
-		fmt.Printf("Dataset saved successfully.\n")
 	}
 
 	fmt.Println("==========================================================")

@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -394,5 +397,98 @@ func TestMatchCrawler_RefreshFlag(t *testing.T) {
 	if s1.Crawled || s2.Crawled {
 		t.Errorf("expected summoners to be marked Crawled = false after Refresh")
 	}
+}
+
+func TestMatchCrawler_CheckpointSkipsWhenSaved(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "checkpoint_test.json")
+
+	store := NewDatasetStore(datasetPath, 3)
+	ds := data.NewDataset()
+	s := ds.GetOrCreateSummoner("p1", "Player1")
+	s.Crawled = true
+
+	// Initial save so ds.Saved becomes true and dataset file exists
+	if err := store.Save(ds); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+	if !ds.Saved {
+		t.Fatalf("expected ds.Saved == true after initial save")
+	}
+
+	proceedChan := make(chan struct{})
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		<-proceedChan
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	cfg := CrawlerConfig{
+		SeedPUUID:          "p1",
+		CheckpointDuration: 20 * time.Millisecond,
+	}
+
+	crawler := NewMatchCrawler(client, ds, store, cfg)
+
+	runDone := make(chan struct{})
+	go func() {
+		_ = crawler.Run(ctx)
+		close(runDone)
+	}()
+
+	// Wait across multiple checkpoint intervals while ds.Saved is true
+	time.Sleep(80 * time.Millisecond)
+
+	// Since ds.Saved was true and no changes occurred, no backup files should have been created
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to read temp dir: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".backup-") {
+			t.Errorf("unexpected backup created while dataset had no changes: %s", entry.Name())
+		}
+	}
+
+	// Now introduce a change under lock
+	crawler.mu.Lock()
+	ds.GetOrCreateSummoner("p2", "Player2")
+	crawler.mu.Unlock()
+
+	if ds.Saved {
+		t.Errorf("expected ds.Saved == false after adding new summoner")
+	}
+
+	// Wait for checkpoint to trigger and save
+	time.Sleep(80 * time.Millisecond)
+
+	crawler.mu.Lock()
+	saved := ds.Saved
+	crawler.mu.Unlock()
+
+	if !saved {
+		t.Errorf("expected ds.Saved to become true after checkpoint saved changes")
+	}
+
+	// Verify a backup was now created as part of the checkpoint save
+	entries, err = os.ReadDir(tmpDir)
+	if err != nil {
+		t.Fatalf("failed to read temp dir: %v", err)
+	}
+	hasBackup := false
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".backup-") {
+			hasBackup = true
+			break
+		}
+	}
+	if !hasBackup {
+		t.Errorf("expected backup file to be created after checkpoint saved changes")
+	}
+
+	close(proceedChan)
+	<-runDone
 }
 

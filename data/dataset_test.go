@@ -365,3 +365,87 @@ func TestDatasetSaveAndLoadJSON(t *testing.T) {
 	}
 }
 
+func TestDatasetSavedFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	jsonPath := filepath.Join(tmpDir, "dataset_saved_test.json")
+
+	ds := data.NewDataset()
+	if ds.Saved {
+		t.Errorf("expected new dataset to have Saved == false")
+	}
+
+	s := ds.GetOrCreateSummoner("p1", "")
+	if ds.Saved {
+		t.Errorf("expected dataset to have Saved == false after adding summoner")
+	}
+
+	if err := ds.SaveToJSON(jsonPath); err != nil {
+		t.Fatalf("SaveToJSON failed: %v", err)
+	}
+	if !ds.Saved {
+		t.Errorf("expected dataset to have Saved == true after SaveToJSON")
+	}
+
+	// Calling GetOrCreateSummoner without modifications should keep Saved == true
+	sameS := ds.GetOrCreateSummoner("p1", "")
+	if sameS != s {
+		t.Errorf("expected same summoner pointer")
+	}
+	if !ds.Saved {
+		t.Errorf("expected dataset to remain Saved == true when GetOrCreateSummoner makes no changes")
+	}
+
+	// Updating summoner name should mark Saved == false
+	ds.GetOrCreateSummoner("p1", "NewName")
+	if ds.Saved {
+		t.Errorf("expected dataset to have Saved == false after updating summoner name")
+	}
+
+	if err := ds.SaveToJSON(jsonPath); err != nil {
+		t.Fatalf("SaveToJSON failed: %v", err)
+	}
+	if !ds.Saved {
+		t.Errorf("expected dataset to have Saved == true after SaveToJSON")
+	}
+
+	// Adding match should mark Saved == false
+	m := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "MATCH_SAVED_1"},
+		Info: data.InfoDto{
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p1", SummonerName: "NewName"},
+			},
+		},
+	}
+	ds.AddMatch(m)
+	if ds.Saved {
+		t.Errorf("expected dataset to have Saved == false after AddMatch")
+	}
+
+	// Save again
+	if err := ds.SaveToJSON(jsonPath); err != nil {
+		t.Fatalf("SaveToJSON failed: %v", err)
+	}
+	if !ds.Saved {
+		t.Errorf("expected dataset to have Saved == true after SaveToJSON")
+	}
+
+	// Adding duplicate match should not modify Saved
+	ds.AddMatch(m)
+	if !ds.Saved {
+		t.Errorf("expected dataset to remain Saved == true after adding duplicate match")
+	}
+
+	// LoadFromJSON should set Saved == true
+	loaded := data.NewDataset()
+	if loaded.Saved {
+		t.Errorf("expected new empty loaded dataset to have Saved == false")
+	}
+	if err := loaded.LoadFromJSON(jsonPath); err != nil {
+		t.Fatalf("LoadFromJSON failed: %v", err)
+	}
+	if !loaded.Saved {
+		t.Errorf("expected loaded dataset to have Saved == true after LoadFromJSON")
+	}
+}
+

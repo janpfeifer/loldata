@@ -11,7 +11,7 @@ func TestFindSummoner(t *testing.T) {
 	ds := data.NewDataset()
 
 	s1 := ds.GetOrCreateSummoner("puuid_111", "LuckyShott#1114")
-	s2 := ds.GetOrCreateSummoner("puuid_222", "LuckyCat#EUW")
+	_ = ds.GetOrCreateSummoner("puuid_222", "LuckyCat#EUW")
 	s3 := ds.GetOrCreateSummoner("puuid_333", "Faker")
 
 	// 1. Direct PUUID lookup
@@ -249,5 +249,81 @@ func TestComputeSummonerStats(t *testing.T) {
 	// Verify Queues Stats
 	if len(stats.Queues) != 2 {
 		t.Fatalf("expected 2 queues, got %d", len(stats.Queues))
+	}
+}
+
+func TestComputeSummonerStatsEsports(t *testing.T) {
+	ds := data.NewDataset()
+
+	m := &data.MatchV5{
+		Metadata: data.MetadataDto{
+			MatchID: "LOLTMNT01_100",
+		},
+		Esports: &data.EsportsMatchData{
+			League: "LCK",
+			Date:   time.Date(2025, 3, 1, 10, 0, 0, 0, time.UTC),
+		},
+		Info: data.InfoDto{
+			GameDuration: 1800,
+			Teams: []*data.TeamDto{
+				{TeamID: 100, Win: true, Esports: &data.EsportsTeamData{TeamKills: 15}},
+				{TeamID: 200, Win: false, Esports: &data.EsportsTeamData{TeamKills: 5}},
+			},
+			Participants: []*data.ParticipantDto{
+				{
+					PUUID:        "oe:player:faker",
+					SummonerName: "Faker",
+					TeamID:       100,
+					ChampionName: "Ahri",
+					Win:          true,
+					Kills:        5,
+					Deaths:       0,
+					Assists:      10,
+					Esports: &data.EsportsParticipantData{
+						PlayerName:         "Faker",
+						PlayerID:           "oe:player:faker",
+						Position:           data.PositionMid,
+						TotalCS:            250,
+						DamageToChampions:  20000,
+						DamageShare:        0.28,
+						VisionScore:        35.0,
+						WardsPlaced:        15,
+						WardsKilled:        5,
+						ControlWardsBought: 3,
+					},
+				},
+			},
+		},
+	}
+
+	ds.AddMatch(m)
+
+	faker := ds.GetSummoner("oe:player:faker")
+	if faker == nil {
+		t.Fatalf("Faker not found in dataset")
+	}
+
+	stats := faker.ComputeStats()
+	if stats == nil {
+		t.Fatalf("expected stats not nil")
+	}
+
+	if stats.TotalMatches != 1 {
+		t.Errorf("expected 1 match, got %d", stats.TotalMatches)
+	}
+	if !stats.PerfectKDA {
+		t.Errorf("expected PerfectKDA with 0 deaths")
+	}
+	if stats.KDARatio != 15.0 {
+		t.Errorf("expected KDARatio 15.0, got %.2f", stats.KDARatio)
+	}
+	if stats.TotalCS != 250 {
+		t.Errorf("expected TotalCS 250, got %d", stats.TotalCS)
+	}
+	if stats.AvgDamageShare != 0.28 {
+		t.Errorf("expected AvgDamageShare 0.28, got %.2f", stats.AvgDamageShare)
+	}
+	if len(stats.Queues) != 1 || stats.Queues[0].Description != "Esports (LCK)" {
+		t.Errorf("expected Queue 'Esports (LCK)', got %v", stats.Queues[0])
 	}
 }

@@ -166,6 +166,7 @@ func (s *DatasetStore) Save(ds *data.Dataset) error {
 		return fmt.Errorf("failed to atomically rename %q to %q: %w", s.tempPath, s.filePath, err)
 	}
 
+	ds.Saved = true
 	return nil
 }
 

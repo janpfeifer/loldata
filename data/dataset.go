@@ -15,6 +15,9 @@ type Dataset struct {
 	// Summoners contains all summoners/players in the dataset.
 	Summoners []*SummonerV4 `json:"summoners"`
 
+	// Saved indicates whether the dataset is saved to disk and has had no modifications since.
+	Saved bool `json:"-"`
+
 	// PUUIDToSummoner indexes summoners by their PUUID (or OE player ID).
 	PUUIDToSummoner map[string]*SummonerV4 `json:"-"`
 
@@ -49,6 +52,7 @@ func (d *Dataset) SaveToJSON(filePath string) error {
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("failed to flush data to JSON file %q: %w", filePath, err)
 	}
+	d.Saved = true
 	return nil
 }
 
@@ -119,6 +123,7 @@ func (d *Dataset) LoadFromJSON(filePath string) error {
 		d.AddMatch(m)
 	}
 
+	d.Saved = true
 	return nil
 }
 
@@ -147,6 +152,7 @@ func (d *Dataset) GetOrCreateSummoner(puuid, name string) *SummonerV4 {
 	if s, exists := d.PUUIDToSummoner[puuid]; exists {
 		if s.Name == "" && name != "" {
 			s.Name = name
+			d.Saved = false
 		}
 		return s
 	}
@@ -158,6 +164,7 @@ func (d *Dataset) GetOrCreateSummoner(puuid, name string) *SummonerV4 {
 	}
 	d.Summoners = append(d.Summoners, s)
 	d.PUUIDToSummoner[puuid] = s
+	d.Saved = false
 	return s
 }
 
@@ -184,6 +191,7 @@ func (d *Dataset) AddMatch(m *MatchV5) {
 	}
 
 	d.Matches = append(d.Matches, m)
+	d.Saved = false
 
 	// Link participants and summoners
 	for _, p := range m.Info.Participants {

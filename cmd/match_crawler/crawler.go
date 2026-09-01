@@ -49,8 +49,9 @@ func NewMatchCrawler(client *RiotClient, dataset *data.Dataset, store *DatasetSt
 	// If Refresh is enabled, mark all summoners in the dataset as uncrawled so they are re-queued.
 	if cfg.Refresh {
 		for _, s := range dataset.Summoners {
-			if s != nil {
+			if s != nil && s.Crawled {
 				s.Crawled = false
+				dataset.Saved = false
 			}
 		}
 	}
@@ -134,28 +135,36 @@ func (c *MatchCrawler) CrawledMatchesCount() int {
 	return c.crawledMatchesCount
 }
 
-func applySummonerProfile(target, src *data.SummonerV4) {
+func applySummonerProfile(target, src *data.SummonerV4) bool {
 	if target == nil || src == nil {
-		return
+		return false
 	}
+	changed := false
 	if target.Name == "" && src.Name != "" {
 		target.Name = src.Name
+		changed = true
 	}
 	if target.SummonerLevel == 0 && src.SummonerLevel != 0 {
 		target.SummonerLevel = src.SummonerLevel
+		changed = true
 	}
 	if target.AccountID == "" && src.AccountID != "" {
 		target.AccountID = src.AccountID
+		changed = true
 	}
 	if target.ID == "" && src.ID != "" {
 		target.ID = src.ID
+		changed = true
 	}
 	if target.ProfileIconID == 0 && src.ProfileIconID != 0 {
 		target.ProfileIconID = src.ProfileIconID
+		changed = true
 	}
 	if target.RevisionDate == 0 && src.RevisionDate != 0 {
 		target.RevisionDate = src.RevisionDate
+		changed = true
 	}
+	return changed
 }
 
 // Run executes the crawler until the queue is exhausted, target max matches is reached, or ctx is canceled.
@@ -172,6 +181,10 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 					return
 				case <-ticker.C:
 					c.mu.Lock()
+					if c.dataset.Saved {
+						c.mu.Unlock()
+						continue
+					}
 					matches := len(c.dataset.Matches)
 					summoners := len(c.dataset.Summoners)
 					err := c.store.Save(c.dataset)
@@ -258,9 +271,14 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			c.mu.Lock()
 			s := c.dataset.GetOrCreateSummoner(puuid, "")
 			if summonerProfile != nil {
-				applySummonerProfile(s, summonerProfile)
+				if applySummonerProfile(s, summonerProfile) {
+					c.dataset.Saved = false
+				}
 			}
-			s.Crawled = true
+			if !s.Crawled {
+				s.Crawled = true
+				c.dataset.Saved = false
+			}
 			displayName := puuid
 			if s.Name != "" {
 				displayName = fmt.Sprintf("%s (%s)", s.Name, puuid)
@@ -333,14 +351,19 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		c.mu.Lock()
 		s := c.dataset.GetOrCreateSummoner(puuid, "")
 		if summonerProfile != nil {
-			applySummonerProfile(s, summonerProfile)
+			if applySummonerProfile(s, summonerProfile) {
+				c.dataset.Saved = false
+			}
 		}
 
 		countBefore := c.crawledMatchesCount
 		for _, match := range fetchedMatches {
 			c.dataset.AddMatch(match)
 		}
-		s.Crawled = true
+		if !s.Crawled {
+			s.Crawled = true
+			c.dataset.Saved = false
+		}
 		c.crawledMatchesCount += len(fetchedMatches)
 
 		// Enqueue other participants from all matches of this summoner (both new and already present)
