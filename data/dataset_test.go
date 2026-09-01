@@ -215,6 +215,7 @@ func TestDatasetSaveAndLoadJSON(t *testing.T) {
 	// Register a standalone summoner (without match yet)
 	sStandalone := ds.GetOrCreateSummoner("solo_player", "SoloPlayer")
 	sStandalone.SummonerLevel = 42
+	sStandalone.Crawled = true
 
 	// Create matches
 	m1 := &data.MatchV5{
@@ -271,6 +272,9 @@ func TestDatasetSaveAndLoadJSON(t *testing.T) {
 
 	ds.AddMatch(m1)
 	ds.AddMatch(m2)
+
+	// Mark p1 as crawled, leaving p2 uncrawled
+	ds.GetSummoner("p1").Crawled = true
 
 	// Save to JSON
 	if err := ds.SaveToJSON(jsonPath); err != nil {
@@ -343,6 +347,21 @@ func TestDatasetSaveAndLoadJSON(t *testing.T) {
 	}
 	if len(solo.Matches) != 0 {
 		t.Errorf("expected 0 matches for solo_player, got %d", len(solo.Matches))
+	}
+	if !solo.Crawled {
+		t.Errorf("expected solo_player.Crawled to be true")
+	}
+
+	// Verify Crawled status on loaded summoners
+	if !p1.Crawled {
+		t.Errorf("expected p1.Crawled to be true")
+	}
+	p2 := loaded.GetSummoner("p2")
+	if p2 == nil {
+		t.Fatalf("GetSummoner('p2') returned nil")
+	}
+	if p2.Crawled {
+		t.Errorf("expected p2.Crawled to be false")
 	}
 }
 

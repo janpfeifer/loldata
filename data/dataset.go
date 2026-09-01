@@ -102,6 +102,9 @@ func (d *Dataset) LoadFromJSON(filePath string) error {
 			if existing.RevisionDate == 0 && s.RevisionDate != 0 {
 				existing.RevisionDate = s.RevisionDate
 			}
+			if !existing.Crawled && s.Crawled {
+				existing.Crawled = s.Crawled
+			}
 		} else {
 			d.Summoners = append(d.Summoners, s)
 			d.PUUIDToSummoner[s.PUUID] = s

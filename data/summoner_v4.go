@@ -28,6 +28,9 @@ type SummonerV4 struct {
 	// Name is the player / summoner name (if available).
 	Name string `json:"name,omitempty"`
 
+	// Crawled indicates whether this summoner's match history has been fully crawled.
+	Crawled bool `json:"crawled,omitempty"`
+
 	// Matches contains references to all matches this summoner participated in,
 	// maintained in chronological order by match start/creation time.
 	Matches []*MatchV5 `json:"-"`

@@ -164,6 +164,14 @@ func (d *Dataset) LoadOraclesElixir(csvFilePath string) error {
 	}
 
 	flushCurrentMatch()
+
+	// Mark all summoners loaded from Oracle's Elixir as crawled
+	for _, s := range d.Summoners {
+		if s != nil {
+			s.Crawled = true
+		}
+	}
+
 	return nil
 }
 
