@@ -2,6 +2,16 @@
 
 Go library and tools for processing League of Legends match and player data for statistical analysis and machine learning experimentation.
 
+Purely for research (Graph Neural Networks) and improvement purposes.
+
+## Goals
+
+This is very experimental, but loose goals would be something like:
+
+- Machine learning a match winner (and maybe other variables) prediction model.
+- Tool to display for a summoner, how they performed vs how it was predicted.
+- What-if tools: provide predicted counterfactuals, to help players make better choices.
+
 ## Features
 
 - **Riot Match-V5 & Summoner-V4 Compatible Models**: Complete Go structs (`MatchV5`, `SummonerV4`, `ParticipantDto`, `TeamDto`, etc.) adhering to the official Riot Games API schemas.
