@@ -68,3 +68,32 @@ func TestDatasetStoreAtomicSaveAndBackups(t *testing.T) {
 		t.Errorf("expected 5 summoners, got %d", len(loadedDS.Summoners))
 	}
 }
+
+func TestDatasetStoreCleanup(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "matches.json")
+	lockPath := datasetPath + ".lock"
+
+	store := NewDatasetStore(datasetPath, 1)
+	ds := data.NewDataset()
+
+	if err := store.Save(ds); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	// Lock file should exist after Save
+	if _, err := os.Stat(lockPath); os.IsNotExist(err) {
+		t.Fatalf("expected lock file %s to exist after save", lockPath)
+	}
+
+	// Cleanup should remove the lock file
+	store.Cleanup()
+
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Errorf("expected lock file %s to be removed after Cleanup", lockPath)
+	}
+
+	// Calling Cleanup again should be a safe no-op
+	store.Cleanup()
+}
+

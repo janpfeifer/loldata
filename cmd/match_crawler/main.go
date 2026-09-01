@@ -98,6 +98,7 @@ func main() {
 	var store *DatasetStore
 	if datasetPath != "" {
 		store = NewDatasetStore(datasetPath, *backupsFlag)
+		defer store.Cleanup()
 		if store.Exists() {
 			fmt.Printf("Loading existing dataset from %s ...\n", datasetPath)
 			if err := store.Load(dataset); err != nil {
@@ -118,6 +119,13 @@ func main() {
 		sig := <-sigChan
 		fmt.Printf("\nReceived signal (%v). Gracefully shutting down...\n", sig)
 		cancel()
+		// Second signal forces immediate exit
+		sig2 := <-sigChan
+		fmt.Printf("\nReceived second signal (%v). Forcefully exiting...\n", sig2)
+		if store != nil {
+			store.Cleanup()
+		}
+		os.Exit(1)
 	}()
 
 	// 7. Resolve seed if provided
@@ -128,6 +136,9 @@ func main() {
 		seedPUUID, err = client.ResolveSeedToPUUID(ctx, *seedFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving seed %q: %v\n", *seedFlag, err)
+			if store != nil {
+				store.Cleanup()
+			}
 			os.Exit(1)
 		}
 		fmt.Printf("Resolved seed %q -> PUUID: %s\n", *seedFlag, seedPUUID)
@@ -149,6 +160,9 @@ func main() {
 		if len(dataset.Matches) == 0 {
 			fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
 			flag.PrintDefaults()
+			if store != nil {
+				store.Cleanup()
+			}
 			os.Exit(1)
 		}
 		fmt.Printf("Dataset loaded (%d matches, %d summoners). All summoners have already been crawled.\n",
@@ -171,6 +185,7 @@ func main() {
 				len(dataset.Matches), len(dataset.Summoners), store.FilePath())
 			if err := store.Save(dataset); err != nil {
 				fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
+				store.Cleanup()
 				os.Exit(1)
 			}
 			fmt.Printf("Dataset saved successfully.\n")

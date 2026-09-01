@@ -46,6 +46,16 @@ func (s *DatasetStore) Exists() bool {
 	return err == nil && !info.IsDir()
 }
 
+// Cleanup removes the lock file if it exists.
+func (s *DatasetStore) Cleanup() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.lockPath != "" {
+		_ = os.Remove(s.lockPath)
+	}
+}
+
 // Load loads the dataset from filePath into ds if the file exists.
 // If the file does not exist, it does nothing and returns nil.
 func (s *DatasetStore) Load(ds *data.Dataset) error {
