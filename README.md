@@ -22,6 +22,36 @@ This is very experimental, but loose goals would be something like:
 
 ---
 
+## Command-Line Tool: `cmd/match_crawler`
+
+`cmd/match_crawler` is a CLI tool to crawl Riot Match-V5 and Summoner-V4 APIs to collect match records and player profiles into a JSON dataset.
+
+### Usage
+
+```bash
+export RIOT_API_KEY="RGAPI-..."
+
+go run ./cmd/match_crawler \
+  -seed "Faker#KR1" \
+  -platform kr \
+  -dataset ./kr_matches.json \
+  -checkpoints 10m \
+  -backups 3 \
+  -start_time "7d" \
+  -limit_reqs_persec 19 \
+  -limit_reqs_per2min 99
+```
+
+### Features & Flags
+
+- **Dataset Persistence (`-dataset`)**: Reads existing dataset on startup, saves progress on periodic checkpoints, and performs final save on exit.
+- **Atomic Writes & Backups (`-checkpoints`, `-backups`)**: Saves to temporary `<dataset>~` file, safely rotates backups into `<dataset>.backup-YYYYMMDDhhmmss`, prunes older backups, and atomically renames.
+- **Strict Global Rate Limiting (`-limit_reqs_persec`, `-limit_reqs_per2min`)**: Enforces multi-window throttling across all API calls to prevent Riot server blocks.
+- **Time Filtering (`-start_time`, `-end_time`)**: Downloads only matches within specified window (supports relative durations like `7d`, `1w`, `24h` or dates/timestamps).
+- **Riot ID Resolution (`-seed`)**: Resolves player seeds (`GameName#TagLine`) to PUUIDs and crawls matches and participants graph.
+
+---
+
 ## Command-Line Tool: `cmd/stats`
 
 `cmd/stats` is a CLI tool to load Oracle's Elixir CSV datasets and compute dataset-wide statistics, player activity distributions, and match summaries.

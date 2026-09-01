@@ -20,6 +20,13 @@ loldata/
 ├── .agents/
 │   └── AGENT.md                   # This guide for AI agents
 ├── cmd/
+│   ├── match_crawler/             # CLI tool to crawl Riot Match-V5 and Summoner-V4 APIs
+│   │   ├── crawler.go
+│   │   ├── main.go
+│   │   ├── riot_client.go
+│   │   ├── store.go
+│   │   ├── throttler.go
+│   │   └── time_parser.go
 │   └── stats/
 │       └── main.go                # CLI tool to inspect dataset statistics & quantiles
 ├── data/
@@ -81,6 +88,20 @@ loldata/
 ---
 
 ## 4. CLI Tools (`cmd/`)
+
+### `cmd/match_crawler/`
+- Crawls League of Legends matches and summoners using Riot Match-V5 and Summoner-V4 APIs.
+- Flags:
+  - `-dataset`: Target dataset JSON file path (loaded at startup, saved on checkpoint/exit).
+  - `-checkpoints`: Periodic save interval (default `10m`).
+  - `-backups`: Rotating backup count (default `3`, saved to `<file>.backup-YYYYMMDDhhmmss`).
+  - `-start_time`: Match start filter (default `1w` ago).
+  - `-end_time`: Match end filter (default execution time).
+  - `-limit_reqs_persec`: Request rate bottleneck per second (default `19`).
+  - `-limit_reqs_per2min`: Request rate bottleneck per 2 minutes (default `99`).
+  - `-seed`: Initial summoner name or Riot ID (e.g. `Faker#KR1`).
+  - `-api_key`: Riot API key (or `RIOT_API_KEY` / `RIOT_TOKEN` env var).
+  - `-platform`: Platform routing (default `na1`).
 
 ### `cmd/stats/main.go`
 - Accepts `-oe <files>` or positional arguments.
