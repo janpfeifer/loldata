@@ -55,9 +55,9 @@ func (s *DatasetStore) Cleanup() {
 }
 
 func isGobPath(p string) bool {
-	lower := strings.ToLower(p)
-	return strings.HasSuffix(lower, ".gob") || strings.HasSuffix(lower, ".bin") ||
-		strings.HasSuffix(lower, ".gob.gz") || strings.HasSuffix(lower, ".bin.gz")
+	clean := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(p), "~"), ".tmp")
+	return strings.HasSuffix(clean, ".gob") || strings.HasSuffix(clean, ".bin") ||
+		strings.HasSuffix(clean, ".gob.gz") || strings.HasSuffix(clean, ".bin.gz")
 }
 
 // Load loads the dataset from filePath into ds if the file exists.

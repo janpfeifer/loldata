@@ -97,3 +97,49 @@ func TestDatasetStoreCleanup(t *testing.T) {
 	store.Cleanup()
 }
 
+func TestDatasetStoreGobGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "matches.gob.gz")
+
+	store := NewDatasetStore(datasetPath, 2)
+	ds := data.NewDataset()
+	ds.GetOrCreateSummoner("faker_puuid", "Faker")
+
+	m := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "MATCH_GOB_1"},
+		Info: data.InfoDto{
+			GameDuration: 1800,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "faker_puuid", SummonerName: "Faker"},
+			},
+		},
+	}
+	ds.AddMatch(m)
+
+	if err := store.Save(ds); err != nil {
+		t.Fatalf("store.Save(.gob.gz) failed: %v", err)
+	}
+
+	// Verify the file was written and starts with gzip magic bytes (0x1f, 0x8b)
+	content, err := os.ReadFile(datasetPath)
+	if err != nil {
+		t.Fatalf("failed to read saved .gob.gz file: %v", err)
+	}
+	if len(content) < 2 || content[0] != 0x1f || content[1] != 0x8b {
+		t.Fatalf("expected gzip magic bytes 0x1f 0x8b, got %x %x", content[0], content[1])
+	}
+
+	// Verify loading
+	loadedDS := data.NewDataset()
+	if err := store.Load(loadedDS); err != nil {
+		t.Fatalf("store.Load(.gob.gz) failed: %v", err)
+	}
+	if len(loadedDS.Matches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(loadedDS.Matches))
+	}
+	if loadedDS.GetSummoner("faker_puuid") == nil {
+		t.Fatalf("summoner faker_puuid not found in loaded dataset")
+	}
+}
+
+

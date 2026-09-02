@@ -28,9 +28,10 @@ type datasetStorageDTO struct {
 	Summoners []*SummonerV4 `json:"summoners"`
 }
 
-// isGzip returns true if the filePath ends with ".gz", case-insensitively.
+// isGzip returns true if the filePath ends with ".gz" (ignoring temporary suffixes like "~" or ".tmp"), case-insensitively.
 func isGzip(filePath string) bool {
-	return strings.HasSuffix(strings.ToLower(filePath), ".gz")
+	clean := strings.TrimSuffix(strings.TrimSuffix(strings.ToLower(filePath), "~"), ".tmp")
+	return strings.HasSuffix(clean, ".gz")
 }
 
 // WriteJSON serializes the dataset's matches and summoners as formatted JSON to the given writer.
