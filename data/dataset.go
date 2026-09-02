@@ -1,12 +1,5 @@
 package data
 
-import (
-	"bufio"
-	"encoding/json"
-	"fmt"
-	"os"
-)
-
 // Dataset represents a collection of matches and summoners with indexing for fast lookups.
 type Dataset struct {
 	// Matches contains all matches loaded into the dataset.
@@ -33,98 +26,6 @@ func NewDataset() *Dataset {
 		PUUIDToSummoner: make(map[string]*SummonerV4),
 		MatchIDToMatch:  make(map[string]*MatchV5),
 	}
-}
-
-// SaveToJSON serializes the dataset's matches and summoners and writes them to a JSON file.
-func (d *Dataset) SaveToJSON(filePath string) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to create JSON file %q: %w", filePath, err)
-	}
-	defer file.Close()
-
-	w := bufio.NewWriter(file)
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(d); err != nil {
-		return fmt.Errorf("failed to encode dataset to JSON %q: %w", filePath, err)
-	}
-	if err := w.Flush(); err != nil {
-		return fmt.Errorf("failed to flush data to JSON file %q: %w", filePath, err)
-	}
-	d.Saved = true
-	return nil
-}
-
-// LoadFromJSON deserializes matches and summoners from a JSON file into the dataset,
-// restoring indexing and bidirectional references.
-func (d *Dataset) LoadFromJSON(filePath string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to open JSON file %q: %w", filePath, err)
-	}
-	defer file.Close()
-
-	r := bufio.NewReader(file)
-	var loaded Dataset
-	dec := json.NewDecoder(r)
-	if err := dec.Decode(&loaded); err != nil {
-		return fmt.Errorf("failed to decode dataset from JSON %q: %w", filePath, err)
-	}
-
-	if d.PUUIDToSummoner == nil {
-		d.PUUIDToSummoner = make(map[string]*SummonerV4)
-	}
-	if d.MatchIDToMatch == nil {
-		d.MatchIDToMatch = make(map[string]*MatchV5)
-	}
-
-	// Register all summoners first
-	for _, s := range loaded.Summoners {
-		if s == nil || s.PUUID == "" {
-			continue
-		}
-		if s.Matches == nil {
-			s.Matches = make([]*MatchV5, 0)
-		}
-		if existing, exists := d.PUUIDToSummoner[s.PUUID]; exists {
-			if existing.Name == "" && s.Name != "" {
-				existing.Name = s.Name
-			}
-			if existing.AccountID == "" && s.AccountID != "" {
-				existing.AccountID = s.AccountID
-			}
-			if existing.ID == "" && s.ID != "" {
-				existing.ID = s.ID
-			}
-			if existing.SummonerLevel == 0 && s.SummonerLevel != 0 {
-				existing.SummonerLevel = s.SummonerLevel
-			}
-			if existing.ProfileIconID == 0 && s.ProfileIconID != 0 {
-				existing.ProfileIconID = s.ProfileIconID
-			}
-			if existing.RevisionDate == 0 && s.RevisionDate != 0 {
-				existing.RevisionDate = s.RevisionDate
-			}
-			if !existing.Crawled && s.Crawled {
-				existing.Crawled = s.Crawled
-			}
-		} else {
-			d.Summoners = append(d.Summoners, s)
-			d.PUUIDToSummoner[s.PUUID] = s
-		}
-	}
-
-	// Add matches and establish links
-	for _, m := range loaded.Matches {
-		if m == nil {
-			continue
-		}
-		d.AddMatch(m)
-	}
-
-	d.Saved = true
-	return nil
 }
 
 // GetSummoner looks up a summoner by PUUID. Returns nil if not found.

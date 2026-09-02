@@ -33,6 +33,8 @@ loldata/
 │   ├── dataset.go                 # Dataset struct, match & summoner registration/indexing
 │   ├── dataset_test.go            # Unit and regression tests
 │   ├── enums.go                   # Side, Position, DataCompleteness, DragonType enums
+│   ├── io.go                      # Dataset I/O (JSON, Gob, automatic GZip compression)
+│   ├── io_test.go                 # Unit tests for JSON, Gob, and GZip serialization
 │   ├── match_v5.go                # MatchV5, InfoDto, ParticipantDto, TeamDto & esports models
 │   ├── oracles_elixir.go          # Oracle's Elixir CSV loader and row-aggregation logic
 │   ├── summoner_v4.go             # SummonerV4 struct and chronological match linking
@@ -67,8 +69,12 @@ loldata/
   - `PUUIDToSummoner map[string]*SummonerV4`
   - `MatchIDToMatch map[string]*MatchV5`
 - **`Dataset.AddMatch(m *MatchV5)`**: Registers match, resolves or creates participant summoners, and establishes bidirectional links.
-- **`Dataset.SaveToJSON(filePath string) error`**: Serializes matches and summoners to a JSON file.
-- **`Dataset.LoadFromJSON(filePath string) error`**: Deserializes matches and summoners from a JSON file, reconstructing indexes and bidirectional links.
+
+### `data/io.go`
+- **`Dataset.WriteJSON(w io.Writer) error` / `Dataset.ReadJSON(r io.Reader) error`**: Streaming JSON serialization and deserialization.
+- **`Dataset.WriteGob(w io.Writer) error` / `Dataset.ReadGob(r io.Reader) error`**: Fast binary Gob serialization without cyclic references.
+- **`Dataset.SaveToJSON(filePath string) error` / `Dataset.LoadFromJSON(filePath string) error`**: File save/load with automatic `.gz` GZip compression/decompression.
+- **`Dataset.SaveToGob(filePath string) error` / `Dataset.LoadFromGob(filePath string) error`**: Fast binary file save/load with automatic `.gz` GZip compression/decompression.
 - **`Dataset.LoadOraclesElixir(csvFilePath string) error`**:
   - Reads CSV files from Oracle's Elixir.
   - Groups 12 rows sharing the same `gameid` (10 player rows + 2 team rows) into a single `MatchV5` instance.

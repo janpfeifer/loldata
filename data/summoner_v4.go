@@ -1,6 +1,8 @@
 package data
 
 import (
+	"bytes"
+	"encoding/gob"
 	"sort"
 )
 
@@ -60,4 +62,55 @@ func (s *SummonerV4) AddMatch(m *MatchV5) {
 	s.Matches = append(s.Matches, nil)
 	copy(s.Matches[idx+1:], s.Matches[idx:])
 	s.Matches[idx] = m
+}
+
+// summonerV4Gob is the internal struct for Gob serialization of SummonerV4.
+type summonerV4Gob struct {
+	AccountID     string
+	ProfileIconID int
+	RevisionDate  int64
+	ID            string
+	PUUID         string
+	SummonerLevel int64
+	Name          string
+	Crawled       bool
+}
+
+// GobEncode implements gob.GobEncoder to serialize SummonerV4 without cyclical match references.
+func (s *SummonerV4) GobEncode() ([]byte, error) {
+	var buf bytes.Buffer
+	g := summonerV4Gob{
+		AccountID:     s.AccountID,
+		ProfileIconID: s.ProfileIconID,
+		RevisionDate:  s.RevisionDate,
+		ID:            s.ID,
+		PUUID:         s.PUUID,
+		SummonerLevel: s.SummonerLevel,
+		Name:          s.Name,
+		Crawled:       s.Crawled,
+	}
+	if err := gob.NewEncoder(&buf).Encode(g); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// GobDecode implements gob.GobDecoder to deserialize SummonerV4 without cyclical match references.
+func (s *SummonerV4) GobDecode(data []byte) error {
+	var g summonerV4Gob
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&g); err != nil {
+		return err
+	}
+	s.AccountID = g.AccountID
+	s.ProfileIconID = g.ProfileIconID
+	s.RevisionDate = g.RevisionDate
+	s.ID = g.ID
+	s.PUUID = g.PUUID
+	s.SummonerLevel = g.SummonerLevel
+	s.Name = g.Name
+	s.Crawled = g.Crawled
+	if s.Matches == nil {
+		s.Matches = make([]*MatchV5, 0)
+	}
+	return nil
 }

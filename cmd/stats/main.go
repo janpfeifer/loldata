@@ -16,13 +16,23 @@ import (
 var (
 	oeFilesFlag   = flag.String("oe", "", "Comma-separated list of Oracle's Elixir CSV file paths or glob patterns")
 	jsonFilesFlag = flag.String("json", "", "Comma-separated list of dataset JSON file paths or glob patterns")
-	saveJSONFlag  = flag.String("save-json", "", "Save the loaded dataset to this JSON file")
+	gobFilesFlag  = flag.String("gob", "", "Comma-separated list of dataset Gob binary file paths or glob patterns")
+	saveJSONFlag  = flag.String("save-json", "", "Save the loaded dataset to this JSON file (supports .json or .json.gz)")
+	saveGobFlag   = flag.String("save-gob", "", "Save the loaded dataset to this Gob file (supports .gob, .bin, .gob.gz, .bin.gz)")
 	summonerFlag  = flag.String("summoner", "", "Summoner / player name or PUUID to output statistics for")
+)
+
+type fileFormat int
+
+const (
+	formatOE fileFormat = iota
+	formatJSON
+	formatGob
 )
 
 type loadTask struct {
 	path   string
-	isJSON bool
+	format fileFormat
 }
 
 func main() {
@@ -48,11 +58,23 @@ func main() {
 		return []string{pattern}
 	}
 
+	detectFormat := func(p string) fileFormat {
+		lower := strings.ToLower(p)
+		if strings.HasSuffix(lower, ".gob") || strings.HasSuffix(lower, ".bin") ||
+			strings.HasSuffix(lower, ".gob.gz") || strings.HasSuffix(lower, ".bin.gz") {
+			return formatGob
+		}
+		if strings.HasSuffix(lower, ".json") || strings.HasSuffix(lower, ".json.gz") {
+			return formatJSON
+		}
+		return formatOE
+	}
+
 	// Process -oe flag
 	if *oeFilesFlag != "" {
 		for _, part := range strings.Split(*oeFilesFlag, ",") {
 			for _, p := range expandPaths(part) {
-				tasks = append(tasks, loadTask{path: p, isJSON: false})
+				tasks = append(tasks, loadTask{path: p, format: formatOE})
 			}
 		}
 	}
@@ -61,7 +83,16 @@ func main() {
 	if *jsonFilesFlag != "" {
 		for _, part := range strings.Split(*jsonFilesFlag, ",") {
 			for _, p := range expandPaths(part) {
-				tasks = append(tasks, loadTask{path: p, isJSON: true})
+				tasks = append(tasks, loadTask{path: p, format: formatJSON})
+			}
+		}
+	}
+
+	// Process -gob flag
+	if *gobFilesFlag != "" {
+		for _, part := range strings.Split(*gobFilesFlag, ",") {
+			for _, p := range expandPaths(part) {
+				tasks = append(tasks, loadTask{path: p, format: formatGob})
 			}
 		}
 	}
@@ -69,13 +100,12 @@ func main() {
 	// Also support positional arguments
 	for _, arg := range flag.Args() {
 		for _, p := range expandPaths(arg) {
-			isJSON := strings.HasSuffix(strings.ToLower(p), ".json")
-			tasks = append(tasks, loadTask{path: p, isJSON: isJSON})
+			tasks = append(tasks, loadTask{path: p, format: detectFormat(p)})
 		}
 	}
 
 	if len(tasks) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-oe <oracles_elixir.csv>] [-json <dataset.json>] [-summoner <name|puuid>] [-save-json <out.json>] [files...]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-oe <oracles_elixir.csv>] [-json <dataset.json>] [-gob <dataset.gob>] [-summoner <name|puuid>] [-save-json <out.json>] [-save-gob <out.gob>] [files...]\n\n", os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(1)
 	}
@@ -84,13 +114,20 @@ func main() {
 	startTime := time.Now()
 
 	for _, task := range tasks {
-		if task.isJSON {
+		switch task.format {
+		case formatJSON:
 			fmt.Printf("Loading Dataset JSON: %s ...\n", task.path)
 			if err := dataset.LoadFromJSON(task.path); err != nil {
 				fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", task.path, err)
 				os.Exit(1)
 			}
-		} else {
+		case formatGob:
+			fmt.Printf("Loading Dataset Gob: %s ...\n", task.path)
+			if err := dataset.LoadFromGob(task.path); err != nil {
+				fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", task.path, err)
+				os.Exit(1)
+			}
+		default:
 			fmt.Printf("Loading Oracle's Elixir CSV: %s ...\n", task.path)
 			if err := dataset.LoadOraclesElixir(task.path); err != nil {
 				fmt.Fprintf(os.Stderr, "Error loading %q: %v\n", task.path, err)
@@ -113,6 +150,22 @@ func main() {
 		saveStart := time.Now()
 		if err := dataset.SaveToJSON(savePath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving JSON to %q: %v\n", savePath, err)
+			os.Exit(1)
+		}
+		fmt.Printf("Saved in %v\n\n", time.Since(saveStart))
+	}
+
+	if *saveGobFlag != "" {
+		savePath := *saveGobFlag
+		if strings.HasPrefix(savePath, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				savePath = filepath.Join(home, savePath[2:])
+			}
+		}
+		fmt.Printf("Saving dataset to Gob: %s ...\n", savePath)
+		saveStart := time.Now()
+		if err := dataset.SaveToGob(savePath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error saving Gob to %q: %v\n", savePath, err)
 			os.Exit(1)
 		}
 		fmt.Printf("Saved in %v\n\n", time.Since(saveStart))

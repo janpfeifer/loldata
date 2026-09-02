@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,6 +54,12 @@ func (s *DatasetStore) Cleanup() {
 	}
 }
 
+func isGobPath(p string) bool {
+	lower := strings.ToLower(p)
+	return strings.HasSuffix(lower, ".gob") || strings.HasSuffix(lower, ".bin") ||
+		strings.HasSuffix(lower, ".gob.gz") || strings.HasSuffix(lower, ".bin.gz")
+}
+
 // Load loads the dataset from filePath into ds if the file exists.
 // If the file does not exist, it does nothing and returns nil.
 func (s *DatasetStore) Load(ds *data.Dataset) error {
@@ -82,6 +86,9 @@ func (s *DatasetStore) Load(ds *data.Dataset) error {
 	}
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
+	if isGobPath(s.filePath) {
+		return ds.LoadFromGob(s.filePath)
+	}
 	return ds.LoadFromJSON(s.filePath)
 }
 
@@ -115,34 +122,15 @@ func (s *DatasetStore) Save(ds *data.Dataset) error {
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 
 	// Step 1: Write dataset to temporary file <filePath>~
-	tempFile, err := os.Create(s.tempPath)
-	if err != nil {
-		return fmt.Errorf("failed to create temporary file %q: %w", s.tempPath, err)
+	var saveErr error
+	if isGobPath(s.filePath) {
+		saveErr = ds.SaveToGob(s.tempPath)
+	} else {
+		saveErr = ds.SaveToJSON(s.tempPath)
 	}
-
-	writer := bufio.NewWriter(tempFile)
-	encoder := json.NewEncoder(writer)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(ds); err != nil {
-		tempFile.Close()
+	if saveErr != nil {
 		_ = os.Remove(s.tempPath)
-		return fmt.Errorf("failed to encode dataset to JSON: %w", err)
-	}
-
-	if err := writer.Flush(); err != nil {
-		tempFile.Close()
-		_ = os.Remove(s.tempPath)
-		return fmt.Errorf("failed to flush data to temporary file: %w", err)
-	}
-
-	if err := tempFile.Sync(); err != nil {
-		tempFile.Close()
-		_ = os.Remove(s.tempPath)
-		return fmt.Errorf("failed to sync temporary file: %w", err)
-	}
-	if err := tempFile.Close(); err != nil {
-		_ = os.Remove(s.tempPath)
-		return fmt.Errorf("failed to close temporary file: %w", err)
+		return saveErr
 	}
 
 	// Step 2: Handle backups if previous dataset file exists and backups > 0
