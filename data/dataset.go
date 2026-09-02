@@ -36,6 +36,20 @@ func (d *Dataset) GetSummoner(puuid string) *SummonerV4 {
 	return d.PUUIDToSummoner[puuid]
 }
 
+// NumCrawledSummoners returns the number of summoners marked as crawled in the dataset.
+func (d *Dataset) NumCrawledSummoners() int {
+	if d == nil {
+		return 0
+	}
+	count := 0
+	for _, s := range d.Summoners {
+		if s != nil && s.Crawled {
+			count++
+		}
+	}
+	return count
+}
+
 // GetMatch looks up a match by its MatchID. Returns nil if not found.
 func (d *Dataset) GetMatch(matchID string) *MatchV5 {
 	if d.MatchIDToMatch == nil {

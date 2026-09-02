@@ -449,3 +449,38 @@ func TestDatasetSavedFlag(t *testing.T) {
 	}
 }
 
+func TestDataset_NumCrawledSummoners(t *testing.T) {
+	var nilDs *data.Dataset
+	if nilDs.NumCrawledSummoners() != 0 {
+		t.Errorf("expected nil dataset to return 0 crawled summoners, got %d", nilDs.NumCrawledSummoners())
+	}
+
+	ds := data.NewDataset()
+	if ds.NumCrawledSummoners() != 0 {
+		t.Errorf("expected empty dataset to return 0 crawled summoners, got %d", ds.NumCrawledSummoners())
+	}
+
+	s1 := ds.GetOrCreateSummoner("p1", "Player1")
+	s2 := ds.GetOrCreateSummoner("p2", "Player2")
+	s3 := ds.GetOrCreateSummoner("p3", "Player3")
+
+	if ds.NumCrawledSummoners() != 0 {
+		t.Errorf("expected 0 crawled summoners before any are marked crawled, got %d", ds.NumCrawledSummoners())
+	}
+
+	s1.Crawled = true
+	if ds.NumCrawledSummoners() != 1 {
+		t.Errorf("expected 1 crawled summoner, got %d", ds.NumCrawledSummoners())
+	}
+
+	s3.Crawled = true
+	if ds.NumCrawledSummoners() != 2 {
+		t.Errorf("expected 2 crawled summoners, got %d", ds.NumCrawledSummoners())
+	}
+
+	s2.Crawled = true
+	if ds.NumCrawledSummoners() != 3 {
+		t.Errorf("expected 3 crawled summoners, got %d", ds.NumCrawledSummoners())
+	}
+}
+

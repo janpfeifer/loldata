@@ -104,7 +104,7 @@ func main() {
 			if err := store.Load(dataset); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to load existing dataset %q: %v\n", datasetPath, err)
 			} else {
-				fmt.Printf("Loaded %d matches and %d summoners.\n", len(dataset.Matches), len(dataset.Summoners))
+				fmt.Printf("Loaded %d matches and %d players (%d crawled).\n", len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners())
 			}
 		}
 	}
@@ -165,8 +165,8 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		fmt.Printf("Dataset loaded (%d matches, %d summoners). All summoners have already been crawled.\n",
-			len(dataset.Matches), len(dataset.Summoners))
+		fmt.Printf("Dataset loaded (%d matches, %d players, %d crawled). All summoners have already been crawled.\n",
+			len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners())
 		fmt.Println("To check for new matches or discover new summoners, specify a seed summoner using -seed.")
 		return
 	}
@@ -181,8 +181,8 @@ func main() {
 	if store != nil && store.FilePath() != "" {
 		fmt.Println("----------------------------------------------------------")
 		if !dataset.Saved {
-			fmt.Printf("Saving final dataset (%d matches, %d summoners) to %s ...\n",
-				len(dataset.Matches), len(dataset.Summoners), store.FilePath())
+			fmt.Printf("Saving final dataset (%d matches, %d players (%d crawled)) to %s ...\n",
+				len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), store.FilePath())
 			if err := store.Save(dataset); err != nil {
 				fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
 				store.Cleanup()
@@ -195,7 +195,7 @@ func main() {
 	}
 
 	fmt.Println("==========================================================")
-	fmt.Printf("Crawler finished. Total matches in dataset: %d, players: %d (new matches downloaded: %d)\n",
-		len(dataset.Matches), len(dataset.Summoners), crawler.CrawledMatchesCount())
+	fmt.Printf("Crawler finished. Total matches in dataset: %d, players: %d (%d crawled) (new matches downloaded: %d)\n",
+		len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), crawler.CrawledMatchesCount())
 	fmt.Println("==========================================================")
 }

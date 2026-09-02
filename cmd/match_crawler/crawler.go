@@ -186,12 +186,13 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 						continue
 					}
 					matches := len(c.dataset.Matches)
-					summoners := len(c.dataset.Summoners)
+					totalSummoners := len(c.dataset.Summoners)
+					crawledSummoners := c.dataset.NumCrawledSummoners()
 					err := c.store.Save(c.dataset)
 					c.mu.Unlock()
 
-					fmt.Printf("[Checkpoint] Saving dataset (%d matches, %d summoners) to %s ...\n",
-						matches, summoners, c.store.FilePath())
+					fmt.Printf("[Checkpoint] Saving dataset (%d matches, %d players, %d crawled) to %s ...\n",
+						matches, totalSummoners, crawledSummoners, c.store.FilePath())
 					if err != nil {
 						fmt.Printf("[Checkpoint Error] Failed to save dataset: %v\n", err)
 					} else {
@@ -201,6 +202,12 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			}
 		}()
 	}
+
+	c.mu.Lock()
+	initMatches := len(c.dataset.Matches)
+	initSummoners := len(c.dataset.Summoners)
+	initCrawled := c.dataset.NumCrawledSummoners()
+	c.mu.Unlock()
 
 	fmt.Println("----------------------------------------------------------")
 	fmt.Printf("Starting Match Crawler\n")
@@ -216,7 +223,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		fmt.Printf("  Max Matches:     Unlimited\n")
 	}
 	fmt.Printf("  Initial Queue:   %d summoners\n", c.QueueSize())
-	fmt.Printf("  Initial Dataset: %d matches, %d summoners\n", len(c.dataset.Matches), len(c.dataset.Summoners))
+	fmt.Printf("  Initial Dataset: %d matches, %d players (%d crawled)\n", initMatches, initSummoners, initCrawled)
 	fmt.Println("----------------------------------------------------------")
 
 	for {
@@ -285,11 +292,12 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			}
 			totalMatches := len(c.dataset.Matches)
 			totalSummoners := len(c.dataset.Summoners)
+			crawledSummoners := c.dataset.NumCrawledSummoners()
 			queueSize := len(c.puuidQueue)
 			c.mu.Unlock()
 
-			fmt.Printf("[Summoner] %s: 0 matches found in time window | Dataset: %d matches, %d players | Queue: %d\n",
-				displayName, totalMatches, totalSummoners, queueSize)
+			fmt.Printf("[Summoner] %s: 0 matches found in time window | Dataset: %d matches, %d crawled / %d total players | Queue: %d\n",
+				displayName, totalMatches, crawledSummoners, totalSummoners, queueSize)
 			continue
 		}
 
@@ -396,6 +404,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		}
 		totalMatches := len(c.dataset.Matches)
 		totalSummoners := len(c.dataset.Summoners)
+		crawledSummoners := c.dataset.NumCrawledSummoners()
 		queueSize := len(c.puuidQueue)
 		c.mu.Unlock()
 
@@ -406,8 +415,8 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				countBefore+i+1, match.Metadata.MatchID, matchTime.Format("2006-01-02 15:04"), duration)
 		}
 
-		fmt.Printf("[Summoner] %s: crawled %d matches (%d new) | Dataset: %d matches, %d players | Queue: %d (+%d)\n",
-			displayName, len(allMatches), len(fetchedMatches), totalMatches, totalSummoners, queueSize, newParticipants)
+		fmt.Printf("[Summoner] %s: crawled %d matches (%d new) | Dataset: %d matches, %d crawled / %d total players | Queue: %d (+%d)\n",
+			displayName, len(allMatches), len(fetchedMatches), totalMatches, crawledSummoners, totalSummoners, queueSize, newParticipants)
 	}
 
 	return nil
