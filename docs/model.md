@@ -50,10 +50,15 @@ Each summoner $u$ maintains a latent embedding $h_u \in \mathbb{R}^{d_{\text{sum
 ### 2.2 Summoner State Update Cell
 When summoner $u$ finishes match $t$, their state updates causally based on performance and time elapsed:
 
-$$h_u^{(t)} = \text{GRUCell}\left(m_u^{(t)},\; h_u^{(t-1)}\right)$$
+$$
+h_u^{(t)} = \text{GRUCell}\left(m_u^{(t)},\; h_u^{(t-1)}\right)
+$$
 
 Where the message vector $m_u^{(t)}$ is:
-$$m_u^{(t)} = \text{MLP}_{\text{msg}}\Big(\big[\text{Stats}_{\text{prev}}(u),\; \text{TimeDeltaEncoding}(\Delta t),\; \Delta\text{Patch}\big]\Big)$$
+
+$$
+m_u^{(t)} = \text{MLP}_{\text{msg}}\Big(\big[\text{Stats}_{\text{prev}}(u),\; \text{TimeDeltaEncoding}(\Delta t),\; \Delta\text{Patch}\big]\Big)
+$$
 
 Key inputs to the update cell:
 - **Previous Match Stats**: KDA, kill participation, gold share, damage share, vision score, win/loss, champion played.
@@ -107,21 +112,33 @@ flowchart TB
 
 ### 3.1 Per-Player Feature Fusion
 For each of the 10 slots $(t, p)$ (team $t \in \{\text{Blue}, \text{Red}\}$, role $p \in \{1..5\}$):
-$$z_{t, p} = \text{MLP}_{\text{player}}\Big(\big[h_u^{(t)},\; \text{Emb}_{\text{champ}}(c),\; \text{Emb}_{\text{role}}(p),\; \text{Features}_{\text{static}}(u)\big]\Big)$$
+
+$$
+z_{t, p} = \text{MLP}_{\text{player}}\Big(\big[h_u^{(t)},\; \text{Emb}_{\text{champ}}(c),\; \text{Emb}_{\text{role}}(p),\; \text{Features}_{\text{static}}(u)\big]\Big)
+$$
 
 ### 3.2 Dual-Path Processing
 
 #### Path A: Position-Aware Lane Matchups (Fixed Role Path)
 League of Legends has dedicated 1v1 and 2v2 lane assignments. This path directly models matchup advantage for each role:
-$$d_p = \text{MLP}_{\text{lane}}\Big(\big[z_{\text{Blue}, p},\; z_{\text{Red}, p},\; z_{\text{Blue}, p} - z_{\text{Red}, p}\big]\Big) \quad \text{for } p \in \{\text{TOP}, \text{JUNGLE}, \text{MID}, \text{ADC}, \text{SUPPORT}\}$$
-$$v_{\text{lanes}} = \text{MLP}_{\text{lanes\_agg}}\Big(\text{Concat}(d_{\text{TOP}}, d_{\text{JUNGLE}}, d_{\text{MID}}, d_{\text{ADC}}, d_{\text{SUPPORT}})\Big)$$
+
+$$
+d_p = \text{MLP}_{\text{lane}}\Big(\big[z_{\text{Blue}, p},\; z_{\text{Red}, p},\; z_{\text{Blue}, p} - z_{\text{Red}, p}\big]\Big) \quad \text{for } p \in \{\text{TOP}, \text{JUNGLE}, \text{MID}, \text{ADC}, \text{SUPPORT}\}
+$$
+
+$$
+v_{\text{lanes}} = \text{MLP}_{\text{lanes_{agg}}\Big( \text{Concat}(d_{\text{TOP}}, d_{\text{JUNGLE}}, d_{\text{MID}}, d_{\text{ADC}}, d_{\text{SUPPORT}}) \Big)
+$$
 
 #### Path B: Position-Invariant Attention (Synergy & Team Composition Path)
 Team composition strength transcends fixed lane assignments (e.g. AP/AD damage balance, engage vs. disengage, crowd control chains, dive potential):
 - **Multi-Head Self-Attention (Intra-team & Cross-team)**: Computes interaction weights across all 10 players without position bias.
 - **Permutation-Equivariant Pooling**: Aggregates Blue and Red composition representations ($T_{\text{Blue}}, T_{\text{Red}}$) using multi-head attention pooling.
 - **Team Differential**:
-$$v_{\text{synergy}} = \text{MLP}_{\text{synergy}}\Big(\big[T_{\text{Blue}},\; T_{\text{Red}},\; T_{\text{Blue}} - T_{\text{Red}}\big]\Big)$$
+
+$$
+v_{\text{synergy}} = \text{MLP}_{\text{synergy}}\Big(\big[T_{\text{Blue}},\; T_{\text{Red}},\; T_{\text{Blue}} - T_{\text{Red}}\big]\Big)
+$$
 
 ### 3.3 Global Match Fusion & Multi-Task Heads
 The representations from both paths are concatenated with global match context:
@@ -129,14 +146,28 @@ $$v_{\text{match}} = \text{MLP}_{\text{fusion}}\Big(\big[v_{\text{lanes}},\; v_{
 
 #### Output Heads
 1. **Match Winner (Classification)**:
-   $$\hat{y}_{\text{win}} = \sigma\left(W_{\text{win}} v_{\text{match}} + b_{\text{win}}\right) \quad \longrightarrow \quad \mathcal{L}_{\text{BCE}}(\hat{y}_{\text{win}}, y_{\text{win}})$$
+
+$$
+\hat{y}_{\text{win}} = \sigma\left(W_{\text{win}} v_{\text{match}} + b_{\text{win}}\right) \quad \longrightarrow \quad \mathcal{L}_{\text{BCE}}(\hat{y}_{\text{win}}, y_{\text{win}})
+$$
+
 2. **Gold Difference at Game End (Regression)**:
-   $$\hat{y}_{\text{gold}} = W_{\text{gold}} v_{\text{match}} + b_{\text{gold}} \quad \longrightarrow \quad \mathcal{L}_{\text{Huber}}(\hat{y}_{\text{gold}}, y_{\text{gold}})$$
+
+$$
+\hat{y}_{\text{gold}} = W_{\text{gold}} v_{\text{match}} + b_{\text{gold}} \quad \longrightarrow \quad \mathcal{L}_{\text{Huber}}(\hat{y}_{\text{gold}}, y_{\text{gold}})
+$$
+
 3. **Total Kills / Kill Differential (Regression)**:
-   $$\hat{y}_{\text{kills}} = \text{Softplus}\left(W_{\text{kills}} v_{\text{match}} + b_{\text{kills}}\right) \quad \longrightarrow \quad \mathcal{L}_{\text{Huber}}(\hat{y}_{\text{kills}}, y_{\text{kills}})$$
+
+$$
+\hat{y}_{\text{kills}} = \text{Softplus}\left(W_{\text{kills}} v_{\text{match}} + b_{\text{kills}}\right) \quad \longrightarrow \quad \mathcal{L}_{\text{Huber}}(\hat{y}_{\text{kills}}, y_{\text{kills}})
+$$
 
 **Total Objective**:
-$$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE}} + \lambda_1 \mathcal{L}_{\text{gold}} + \lambda_2 \mathcal{L}_{\text{kills}}$$
+
+$$
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{BCE}} + \lambda_1 \mathcal{L}_{\text{gold}} + \lambda_2 \mathcal{L}_{\text{kills}}
+$$
 
 ---
 
