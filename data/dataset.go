@@ -1,5 +1,8 @@
 package data
 
+// DefaultSummonerEmbeddingDim is the default dimensionality for summoner dynamic embeddings.
+const DefaultSummonerEmbeddingDim = 64
+
 // Dataset represents a collection of matches and summoners with indexing for fast lookups.
 type Dataset struct {
 	// Matches contains all matches loaded into the dataset.
@@ -16,6 +19,15 @@ type Dataset struct {
 
 	// MatchIDToMatch indexes matches by their unique match/game ID.
 	MatchIDToMatch map[string]*MatchV5 `json:"-"`
+
+	// SummonerEmbeddingDim is the dimensionality of each summoner embedding vector.
+	// Defaults to DefaultSummonerEmbeddingDim (64).
+	SummonerEmbeddingDim int `json:"-"`
+
+	// SummonerEmbeddings is a transient (not saved/loaded) table storing the embedding snapshot
+	// for each of the 10 participant slots per match, stored as a flat slice of shape
+	// [NumMatches, 10, SummonerEmbeddingDim].
+	SummonerEmbeddings []float32 `json:"-"`
 }
 
 // NewDataset initializes and returns an empty Dataset.
@@ -126,4 +138,56 @@ func (d *Dataset) AddMatch(m *MatchV5) {
 		p.Summoner = s
 		s.AddMatch(m)
 	}
+}
+
+// InitSummonerEmbeddings allocates or reallocates the transient summoner embeddings table
+// with the given dimension.
+func (d *Dataset) InitSummonerEmbeddings(dim int) {
+	if dim <= 0 {
+		dim = DefaultSummonerEmbeddingDim
+	}
+	d.SummonerEmbeddingDim = dim
+	totalElements := len(d.Matches) * 10 * dim
+	d.SummonerEmbeddings = make([]float32, totalElements)
+}
+
+// EnsureSummonerEmbeddings guarantees that the transient summoner embeddings table is initialized
+// with the correct size for the current number of matches.
+func (d *Dataset) EnsureSummonerEmbeddings() {
+	if d.SummonerEmbeddingDim <= 0 {
+		d.SummonerEmbeddingDim = DefaultSummonerEmbeddingDim
+	}
+	expectedSize := len(d.Matches) * 10 * d.SummonerEmbeddingDim
+	if len(d.SummonerEmbeddings) != expectedSize {
+		d.SummonerEmbeddings = make([]float32, expectedSize)
+	}
+}
+
+// GetSummonerEmbedding returns a slice pointing to the embedding of the summoner in the specified
+// match index (0..len(Matches)-1) and participant slot (0..9).
+// If indices are out of range or table is uninitialized, returns nil.
+func (d *Dataset) GetSummonerEmbedding(matchIdx, slot int) []float32 {
+	if d == nil || matchIdx < 0 || matchIdx >= len(d.Matches) || slot < 0 || slot >= 10 {
+		return nil
+	}
+	dim := d.SummonerEmbeddingDim
+	if dim <= 0 {
+		dim = DefaultSummonerEmbeddingDim
+	}
+	offset := (matchIdx*10 + slot) * dim
+	if offset+dim > len(d.SummonerEmbeddings) {
+		return nil
+	}
+	return d.SummonerEmbeddings[offset : offset+dim]
+}
+
+// SetSummonerEmbedding writes the embedding values for the specified match index and participant slot.
+func (d *Dataset) SetSummonerEmbedding(matchIdx, slot int, emb []float32) {
+	if d == nil || matchIdx < 0 || matchIdx >= len(d.Matches) || slot < 0 || slot >= 10 {
+		return
+	}
+	d.EnsureSummonerEmbeddings()
+	dim := d.SummonerEmbeddingDim
+	offset := (matchIdx*10 + slot) * dim
+	copy(d.SummonerEmbeddings[offset:offset+dim], emb)
 }

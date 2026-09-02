@@ -37,6 +37,10 @@ loldata/
 │   ├── io_test.go                 # Unit tests for JSON, Gob, and GZip serialization
 │   ├── match_v5.go                # MatchV5, InfoDto, ParticipantDto, TeamDto & esports models
 │   ├── oracles_elixir.go          # Oracle's Elixir CSV loader and row-aggregation logic
+│   ├── sampler.go                 # MatchSampler, SamplerOptions, GoMLX train.Dataset batching
+│   ├── sampler_test.go            # Unit tests for GoMLX dataset sampler & temporal weighting
+│   ├── summoner_stats.go          # Aggregated summoner performance metrics & distributions
+│   ├── summoner_stats_test.go     # Unit tests for summoner stats
 │   ├── summoner_v4.go             # SummonerV4 struct and chronological match linking
 ├── go.mod                         # Go module definition (Go 1.26+)
 ├── go.sum
@@ -85,6 +89,11 @@ loldata/
   - Reads CSV files from Oracle's Elixir.
   - Groups 12 rows sharing the same `gameid` (10 player rows + 2 team rows) into a single `MatchV5` instance.
   - Fallback logic: if `playerid` is empty in the CSV, uses `playername` as the PUUID key.
+
+### `data/sampler.go`
+- **`MatchSampler`**: Implements `train.Dataset` interface from GoMLX (`github.com/gomlx/gomlx/ml/train`).
+- **`SamplerOptions`**: Configurable batch size, start/end time windows, random sampling with replacement vs chronological 1-epoch iteration, `TimeWeight` (0.0 to 1.0 temporal bias), and custom `BatchBuilder`.
+- **`Dataset.Sampler(opts SamplerOptions) train.Dataset`**: Yields multi-task input/label batches formatted for GoMLX training/evaluation.
 
 ### `data/enums.go` & Generated Files
 - **Enums**: `Side` (Blue/Red), `Position` (Top/Jungle/Mid/Bot/Support/Team), `DataCompleteness` (Complete/Partial), `DragonType`.

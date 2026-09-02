@@ -263,3 +263,59 @@ func TestDatasetSaveAndLoadGobGz(t *testing.T) {
 
 	verifyLoadedDataset(t, loaded)
 }
+
+func TestDatasetTransientDataNotSerialized(t *testing.T) {
+	ds := createSampleDataset()
+	ds.InitSummonerEmbeddings(32)
+
+	// Populate non-zero embeddings
+	dummyEmb := make([]float32, 32)
+	for i := range dummyEmb {
+		dummyEmb[i] = float32(i + 1)
+	}
+	ds.SetSummonerEmbedding(0, 0, dummyEmb)
+	ds.SetSummonerEmbedding(1, 4, dummyEmb)
+
+	// 1. Test Gob Serialization
+	var gobBuf bytes.Buffer
+	if err := ds.WriteGob(&gobBuf); err != nil {
+		t.Fatalf("WriteGob failed: %v", err)
+	}
+
+	loadedGob := data.NewDataset()
+	if err := loadedGob.ReadGob(&gobBuf); err != nil {
+		t.Fatalf("ReadGob failed: %v", err)
+	}
+
+	if loadedGob.SummonerEmbeddings != nil {
+		t.Errorf("expected loadedGob.SummonerEmbeddings to be nil, got len=%d", len(loadedGob.SummonerEmbeddings))
+	}
+	if loadedGob.SummonerEmbeddingDim != 0 {
+		t.Errorf("expected loadedGob.SummonerEmbeddingDim to be 0, got %d", loadedGob.SummonerEmbeddingDim)
+	}
+	verifyLoadedDataset(t, loadedGob)
+
+	// 2. Test JSON Serialization
+	var jsonBuf bytes.Buffer
+	if err := ds.WriteJSON(&jsonBuf); err != nil {
+		t.Fatalf("WriteJSON failed: %v", err)
+	}
+
+	jsonStr := jsonBuf.String()
+	if bytes.Contains(jsonBuf.Bytes(), []byte("SummonerEmbeddings")) || bytes.Contains(jsonBuf.Bytes(), []byte("summonerEmbeddings")) {
+		t.Errorf("JSON output unexpectedly contains SummonerEmbeddings field: %s", jsonStr)
+	}
+
+	loadedJSON := data.NewDataset()
+	if err := loadedJSON.ReadJSON(&jsonBuf); err != nil {
+		t.Fatalf("ReadJSON failed: %v", err)
+	}
+
+	if loadedJSON.SummonerEmbeddings != nil {
+		t.Errorf("expected loadedJSON.SummonerEmbeddings to be nil, got len=%d", len(loadedJSON.SummonerEmbeddings))
+	}
+	if loadedJSON.SummonerEmbeddingDim != 0 {
+		t.Errorf("expected loadedJSON.SummonerEmbeddingDim to be 0, got %d", loadedJSON.SummonerEmbeddingDim)
+	}
+	verifyLoadedDataset(t, loadedJSON)
+}
