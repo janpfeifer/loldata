@@ -348,7 +348,7 @@ func (c *RiotClient) GetSummonerByPUUID(ctx context.Context, puuid string) (*dat
 const MaxMatchIDsCount = 100
 
 // GetMatchIDsByPUUID retrieves a list of match IDs for a player within [startTime, endTime].
-// Always requests using the maximum count (=100) to minimize the number of HTTP requests.
+// Always requests with type=ranked to filter for ranked matches only, and maximum count (=100).
 func (c *RiotClient) GetMatchIDsByPUUID(ctx context.Context, puuid string, startTime, endTime time.Time, maxMatches int) ([]string, error) {
 	var matchIDs []string
 	startIdx := 0
@@ -358,6 +358,7 @@ func (c *RiotClient) GetMatchIDsByPUUID(ctx context.Context, puuid string, start
 		params := url.Values{}
 		params.Set("start", strconv.Itoa(startIdx))
 		params.Set("count", strconv.Itoa(pageSize))
+		params.Set("type", "ranked")
 
 		if !startTime.IsZero() {
 			params.Set("startTime", strconv.FormatInt(startTime.Unix(), 10))

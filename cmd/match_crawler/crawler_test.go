@@ -128,6 +128,7 @@ func TestMatchCrawler_AtomicSummonerCrawling(t *testing.T) {
 			MatchID: "NA1_1001",
 		},
 		Info: data.InfoDto{
+			QueueID:            420,
 			GameStartTimestamp: time.Now().UnixMilli(),
 			GameDuration:       1800,
 			Participants: []*data.ParticipantDto{
@@ -142,6 +143,7 @@ func TestMatchCrawler_AtomicSummonerCrawling(t *testing.T) {
 			MatchID: "NA1_1002",
 		},
 		Info: data.InfoDto{
+			QueueID:            420,
 			GameStartTimestamp: time.Now().Add(-1 * time.Hour).UnixMilli(),
 			GameDuration:       1900,
 			Participants: []*data.ParticipantDto{
@@ -255,6 +257,7 @@ func TestMatchCrawler_FailureDoesNotCommitPartialSummoner(t *testing.T) {
 			MatchID: "NA1_1001",
 		},
 		Info: data.InfoDto{
+			QueueID:            420,
 			GameStartTimestamp: time.Now().UnixMilli(),
 			GameDuration:       1800,
 			Participants: []*data.ParticipantDto{
@@ -322,6 +325,7 @@ func TestMatchCrawler_AlreadyCrawledParticipantNotReenqueued(t *testing.T) {
 			MatchID: "NA1_2001",
 		},
 		Info: data.InfoDto{
+			QueueID:            420,
 			GameStartTimestamp: time.Now().UnixMilli(),
 			GameDuration:       1800,
 			Participants: []*data.ParticipantDto{
@@ -579,6 +583,7 @@ func TestMatchCrawler_ParticipantProfilesFetchedImmediatelyAfterMatch(t *testing
 			MatchID: "NA1_5001",
 		},
 		Info: data.InfoDto{
+			QueueID:            420,
 			GameStartTimestamp: time.Now().UnixMilli(),
 			GameDuration:       1800,
 			Participants: []*data.ParticipantDto{
@@ -733,6 +738,62 @@ func TestMatchCrawler_StartupCheckpointsWhileFetchingProfiles(t *testing.T) {
 
 	if loadedDs.NumSummonersWithProfile() != 3 {
 		t.Errorf("expected 3 summoners with profile in saved dataset, got %d", loadedDs.NumSummonersWithProfile())
+	}
+}
+
+func TestMatchCrawler_ClearNonRanked(t *testing.T) {
+	ds := data.NewDataset()
+
+	// m1: Ranked Solo (Queue 420)
+	m1 := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "RANKED_1"},
+		Info: data.InfoDto{
+			QueueID: 420,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p1", SummonerName: "Player1"},
+				{PUUID: "p2", SummonerName: "Player2"},
+			},
+		},
+	}
+	// m2: ARAM (Queue 450)
+	m2 := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "ARAM_2"},
+		Info: data.InfoDto{
+			QueueID: 450,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p3", SummonerName: "Player3"},
+			},
+		},
+	}
+	ds.AddMatch(m1)
+	ds.AddMatch(m2)
+
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	cfg := CrawlerConfig{
+		ClearNonRanked: true,
+	}
+
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+
+	// After ClearNonRanked, ARAM_2 should be removed, and p3 should be removed
+	if len(ds.Matches) != 1 || ds.Matches[0].Metadata.MatchID != "RANKED_1" {
+		t.Errorf("expected 1 ranked match 'RANKED_1', got %d matches", len(ds.Matches))
+	}
+	if len(ds.Summoners) != 2 {
+		t.Errorf("expected 2 summoners (p1, p2), got %d", len(ds.Summoners))
+	}
+	if ds.GetSummoner("p3") != nil {
+		t.Errorf("expected p3 to be removed from dataset")
+	}
+
+	// Queue should not contain p3
+	for _, q := range crawler.puuidQueue {
+		if q == "p3" {
+			t.Errorf("expected p3 to not be in crawler queue")
+		}
 	}
 }
 

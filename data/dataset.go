@@ -209,3 +209,65 @@ func (d *Dataset) SetSummonerEmbedding(matchIdx, slot int, emb []float32) {
 	offset := (matchIdx*10 + slot) * dim
 	copy(d.SummonerEmbeddings[offset:offset+dim], emb)
 }
+
+// ClearNonRanked removes all non-ranked matches from the dataset and eliminates any summoners
+// that are left with no associated matches. Returns the count of removed matches and summoners.
+func (d *Dataset) ClearNonRanked() (int, int) {
+	if d == nil {
+		return 0, 0
+	}
+
+	// 1. Filter dataset matches
+	initialMatches := len(d.Matches)
+	var keptMatches []*MatchV5
+	newMatchIDToMatch := make(map[string]*MatchV5, len(d.Matches))
+	for _, m := range d.Matches {
+		if m != nil && m.IsRanked() {
+			keptMatches = append(keptMatches, m)
+			if m.Metadata.MatchID != "" {
+				newMatchIDToMatch[m.Metadata.MatchID] = m
+			}
+		}
+	}
+	d.Matches = keptMatches
+	d.MatchIDToMatch = newMatchIDToMatch
+	removedMatches := initialMatches - len(keptMatches)
+
+	// 2. Clean up matches on each summoner
+	for _, s := range d.Summoners {
+		if s == nil {
+			continue
+		}
+		var keptSummonerMatches []*MatchV5
+		for _, m := range s.Matches {
+			if m != nil && m.IsRanked() {
+				keptSummonerMatches = append(keptSummonerMatches, m)
+			}
+		}
+		s.Matches = keptSummonerMatches
+	}
+
+	// 3. Filter summoners without matches
+	initialSummoners := len(d.Summoners)
+	var keptSummoners []*SummonerV4
+	newPUUIDToSummoner := make(map[string]*SummonerV4, len(d.Summoners))
+	for _, s := range d.Summoners {
+		if s != nil && len(s.Matches) > 0 {
+			keptSummoners = append(keptSummoners, s)
+			if s.PUUID != "" {
+				newPUUIDToSummoner[s.PUUID] = s
+			}
+		}
+	}
+	d.Summoners = keptSummoners
+	d.PUUIDToSummoner = newPUUIDToSummoner
+	removedSummoners := initialSummoners - len(keptSummoners)
+
+	if removedMatches > 0 || removedSummoners > 0 {
+		d.Saved = false
+		// Invalidate transient embeddings as match indices have shifted
+		d.SummonerEmbeddings = nil
+	}
+
+	return removedMatches, removedSummoners
+}

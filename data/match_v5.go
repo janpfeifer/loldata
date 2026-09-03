@@ -39,6 +39,22 @@ func (m *MatchV5) Duration() time.Duration {
 	return time.Duration(m.Info.GameDuration) * time.Second
 }
 
+// IsRanked returns true if the match is a ranked game (e.g. Ranked Solo/Duo, Ranked Flex, or Esports match).
+func (m *MatchV5) IsRanked() bool {
+	if m == nil {
+		return false
+	}
+	if m.Esports != nil {
+		return true
+	}
+	switch m.Info.QueueID {
+	case 420, 440, 410, 470, 4, 6, 9, 42, 52:
+		return true
+	default:
+		return false
+	}
+}
+
 // GetParticipantByPUUID returns the ParticipantDto corresponding to the given PUUID, or nil if not found.
 func (m *MatchV5) GetParticipantByPUUID(puuid string) *ParticipantDto {
 	for _, p := range m.Info.Participants {

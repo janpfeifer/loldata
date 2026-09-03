@@ -484,3 +484,129 @@ func TestDataset_NumCrawledSummoners(t *testing.T) {
 	}
 }
 
+func TestMatchV5_IsRanked(t *testing.T) {
+	// Ranked Solo/Duo (420)
+	mSolo := &data.MatchV5{Info: data.InfoDto{QueueID: 420}}
+	if !mSolo.IsRanked() {
+		t.Errorf("expected QueueID 420 to be ranked")
+	}
+
+	// Ranked Flex (440)
+	mFlex := &data.MatchV5{Info: data.InfoDto{QueueID: 440}}
+	if !mFlex.IsRanked() {
+		t.Errorf("expected QueueID 440 to be ranked")
+	}
+
+	// Esports match (Esports != nil)
+	mEsports := &data.MatchV5{
+		Info:    data.InfoDto{QueueID: 0},
+		Esports: &data.EsportsMatchData{League: "LCK"},
+	}
+	if !mEsports.IsRanked() {
+		t.Errorf("expected Esports match to be ranked")
+	}
+
+	// Non-ranked: ARAM (450)
+	mARAM := &data.MatchV5{Info: data.InfoDto{QueueID: 450}}
+	if mARAM.IsRanked() {
+		t.Errorf("expected QueueID 450 (ARAM) to NOT be ranked")
+	}
+
+	// Non-ranked: Normal Draft (400)
+	mNormal := &data.MatchV5{Info: data.InfoDto{QueueID: 400}}
+	if mNormal.IsRanked() {
+		t.Errorf("expected QueueID 400 (Normal) to NOT be ranked")
+	}
+
+	// Non-ranked: Arena (1700)
+	mArena := &data.MatchV5{Info: data.InfoDto{QueueID: 1700}}
+	if mArena.IsRanked() {
+		t.Errorf("expected QueueID 1700 (Arena) to NOT be ranked")
+	}
+}
+
+func TestDataset_ClearNonRanked(t *testing.T) {
+	ds := data.NewDataset()
+
+	// m1: Ranked Solo (Queue 420) with p1, p2
+	m1 := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "RANKED_1"},
+		Info: data.InfoDto{
+			QueueID: 420,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p1", SummonerName: "Player1"},
+				{PUUID: "p2", SummonerName: "Player2"},
+			},
+		},
+	}
+
+	// m2: ARAM (Queue 450) with p2, p3
+	m2 := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "ARAM_2"},
+		Info: data.InfoDto{
+			QueueID: 450,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p2", SummonerName: "Player2"},
+				{PUUID: "p3", SummonerName: "Player3"},
+			},
+		},
+	}
+
+	// m3: Normal (Queue 400) with p3 only
+	m3 := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "NORMAL_3"},
+		Info: data.InfoDto{
+			QueueID: 400,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "p3", SummonerName: "Player3"},
+			},
+		},
+	}
+
+	ds.AddMatch(m1)
+	ds.AddMatch(m2)
+	ds.AddMatch(m3)
+
+	if len(ds.Matches) != 3 {
+		t.Fatalf("expected 3 initial matches, got %d", len(ds.Matches))
+	}
+	if len(ds.Summoners) != 3 {
+		t.Fatalf("expected 3 initial summoners, got %d", len(ds.Summoners))
+	}
+
+	removedMatches, removedSummoners := ds.ClearNonRanked()
+
+	// m2 (ARAM) and m3 (Normal) should be removed (2 matches)
+	if removedMatches != 2 {
+		t.Errorf("expected 2 removed matches, got %d", removedMatches)
+	}
+
+	// p3 only had non-ranked matches, so p3 should be removed (1 summoner)
+	if removedSummoners != 1 {
+		t.Errorf("expected 1 removed summoner, got %d", removedSummoners)
+	}
+
+	if len(ds.Matches) != 1 {
+		t.Fatalf("expected 1 remaining match, got %d", len(ds.Matches))
+	}
+	if ds.Matches[0].Metadata.MatchID != "RANKED_1" {
+		t.Errorf("expected remaining match to be 'RANKED_1', got %q", ds.Matches[0].Metadata.MatchID)
+	}
+
+	if len(ds.Summoners) != 2 {
+		t.Fatalf("expected 2 remaining summoners (p1, p2), got %d", len(ds.Summoners))
+	}
+
+	if ds.GetSummoner("p3") != nil {
+		t.Errorf("expected p3 to be removed from PUUIDToSummoner map")
+	}
+
+	s2 := ds.GetSummoner("p2")
+	if s2 == nil {
+		t.Fatalf("expected p2 to exist")
+	}
+	if len(s2.Matches) != 1 || s2.Matches[0].Metadata.MatchID != "RANKED_1" {
+		t.Errorf("expected p2 to only have RANKED_1 match, got %d matches", len(s2.Matches))
+	}
+}
+

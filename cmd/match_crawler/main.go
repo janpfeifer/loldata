@@ -26,8 +26,9 @@ var (
 	apiKeyFlag        = flag.String("api_key", "", "Riot API Key (defaults to RIOT_API_KEY or RIOT_TOKEN environment variable)")
 	platformFlag      = flag.String("platform", "na1", "Riot platform routing (e.g. 'na1', 'euw1', 'kr', 'br1', etc.)")
 	maxMatchesFlag    = flag.Int("max_matches", 0, "Maximum number of new matches to crawl (0 for unlimited)")
-	refreshFlag       = flag.Bool("refresh", false, "Mark all loaded summoners as uncrawled at startup to re-crawl their match histories")
-	verboseFlag       = flag.Bool("verbose", false, "Enable verbose debug output")
+	refreshFlag        = flag.Bool("refresh", false, "Mark all loaded summoners as uncrawled at startup to re-crawl their match histories")
+	clearNonRankedFlag = flag.Bool("clear_non_ranked", false, "Remove non-ranked matches and orphaned summoners with no matches from dataset")
+	verboseFlag        = flag.Bool("verbose", false, "Enable verbose debug output")
 )
 
 func main() {
@@ -153,10 +154,25 @@ func main() {
 		Verbose:            *verboseFlag,
 		SeedPUUID:          seedPUUID,
 		Refresh:            *refreshFlag,
+		ClearNonRanked:     *clearNonRankedFlag,
+	}
+	if *clearNonRankedFlag {
+		removedMatches, removedSummoners := dataset.ClearNonRanked()
+		fmt.Printf("Cleared %d non-ranked matches and %d orphaned summoners with no matches from dataset (remaining: %d matches, %d players).\n",
+			removedMatches, removedSummoners, len(dataset.Matches), len(dataset.Summoners))
 	}
 	crawler := NewMatchCrawler(client, dataset, store, crawlerCfg)
 
 	if crawler.QueueSize() == 0 && len(dataset.Matches) == 0 && len(dataset.Summoners) == 0 {
+		if *clearNonRankedFlag && store != nil && store.FilePath() != "" {
+			if !dataset.Saved {
+				fmt.Printf("Saving cleared dataset to %s ...\n", store.FilePath())
+				if err := store.Save(dataset); err != nil {
+					fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
+				}
+			}
+			return
+		}
 		fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
 		flag.PrintDefaults()
 		if store != nil {

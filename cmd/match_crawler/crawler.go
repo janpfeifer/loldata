@@ -19,6 +19,7 @@ type CrawlerConfig struct {
 	Verbose            bool
 	SeedPUUID          string
 	Refresh            bool
+	ClearNonRanked     bool
 }
 
 // MatchCrawler coordinates crawling matches and summoners from Riot API.
@@ -37,6 +38,11 @@ type MatchCrawler struct {
 
 // NewMatchCrawler initializes a new MatchCrawler.
 func NewMatchCrawler(client *RiotClient, dataset *data.Dataset, store *DatasetStore, cfg CrawlerConfig) *MatchCrawler {
+	// If ClearNonRanked is enabled, remove non-ranked matches and orphaned summoners before queue initialization.
+	if cfg.ClearNonRanked {
+		dataset.ClearNonRanked()
+	}
+
 	crawler := &MatchCrawler{
 		client:        client,
 		dataset:       dataset,
@@ -506,7 +512,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				fetchFailed = true
 				break
 			}
-			if match == nil {
+			if match == nil || !match.IsRanked() {
 				continue
 			}
 
