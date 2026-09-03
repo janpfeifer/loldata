@@ -228,6 +228,7 @@ type SummonerCohortRanks struct {
 	AvgDPM       StatRank
 	AvgVision    StatRank
 	AvgVSPM      StatRank
+	Level        StatRank
 }
 
 // calculateRank computes 1-based rank and percentile position of targetVal within vals.
@@ -270,8 +271,34 @@ func calculateRank(vals []float64, targetVal float64) StatRank {
 
 // computeCohortRanks computes rankings and percentiles for a summoner relative to the cohort in the dataset.
 func computeCohortRanks(ds *data.Dataset, targetSummoner *data.SummonerV4, targetStats *data.SummonerStats) *SummonerCohortRanks {
-	if ds == nil || targetSummoner == nil || targetStats == nil {
+	if ds == nil || targetSummoner == nil {
 		return nil
+	}
+
+	ranks := &SummonerCohortRanks{}
+
+	// Level ranking across all summoners with profiles
+	if targetSummoner.SummonerLevel > 0 {
+		var levelVals []float64
+		hasTargetLevel := false
+		for _, s := range ds.Summoners {
+			if s != nil && s.HasProfile() && s.SummonerLevel > 0 {
+				levelVals = append(levelVals, float64(s.SummonerLevel))
+				if s == targetSummoner || (s.PUUID != "" && s.PUUID == targetSummoner.PUUID) {
+					hasTargetLevel = true
+				}
+			}
+		}
+		if !hasTargetLevel {
+			levelVals = append(levelVals, float64(targetSummoner.SummonerLevel))
+		}
+		if len(levelVals) > 0 {
+			ranks.Level = calculateRank(levelVals, float64(targetSummoner.SummonerLevel))
+		}
+	}
+
+	if targetStats == nil {
+		return ranks
 	}
 
 	var cohort []*data.SummonerV4
@@ -300,7 +327,7 @@ func computeCohortRanks(ds *data.Dataset, targetSummoner *data.SummonerV4, targe
 	}
 
 	if len(cohort) == 0 {
-		return nil
+		return ranks
 	}
 
 	cohortStats := make([]*data.SummonerStats, 0, len(cohort))
@@ -316,10 +343,11 @@ func computeCohortRanks(ds *data.Dataset, targetSummoner *data.SummonerV4, targe
 	}
 
 	if len(cohortStats) == 0 {
-		return nil
+		return ranks
 	}
 
 	n := len(cohortStats)
+	ranks.CohortSize = n
 	matchesVals := make([]float64, n)
 	winRateVals := make([]float64, n)
 	kdaVals := make([]float64, n)
@@ -346,20 +374,19 @@ func computeCohortRanks(ds *data.Dataset, targetSummoner *data.SummonerV4, targe
 		vspmVals[i] = cs.AvgVSPM
 	}
 
-	return &SummonerCohortRanks{
-		CohortSize:   n,
-		TotalMatches: calculateRank(matchesVals, float64(targetStats.TotalMatches)),
-		WinRate:      calculateRank(winRateVals, targetStats.WinRate),
-		KDARatio:     calculateRank(kdaVals, targetStats.KDARatio),
-		AvgCS:        calculateRank(csVals, targetStats.AvgCS),
-		AvgCSPM:      calculateRank(cspmVals, targetStats.AvgCSPM),
-		AvgGold:      calculateRank(goldVals, targetStats.AvgGold),
-		AvgGPM:       calculateRank(gpmVals, targetStats.AvgGPM),
-		AvgDamage:    calculateRank(dmgVals, targetStats.AvgDamageToChampions),
-		AvgDPM:       calculateRank(dpmVals, targetStats.AvgDPM),
-		AvgVision:    calculateRank(visionVals, targetStats.AvgVisionScore),
-		AvgVSPM:      calculateRank(vspmVals, targetStats.AvgVSPM),
-	}
+	ranks.TotalMatches = calculateRank(matchesVals, float64(targetStats.TotalMatches))
+	ranks.WinRate = calculateRank(winRateVals, targetStats.WinRate)
+	ranks.KDARatio = calculateRank(kdaVals, targetStats.KDARatio)
+	ranks.AvgCS = calculateRank(csVals, targetStats.AvgCS)
+	ranks.AvgCSPM = calculateRank(cspmVals, targetStats.AvgCSPM)
+	ranks.AvgGold = calculateRank(goldVals, targetStats.AvgGold)
+	ranks.AvgGPM = calculateRank(gpmVals, targetStats.AvgGPM)
+	ranks.AvgDamage = calculateRank(dmgVals, targetStats.AvgDamageToChampions)
+	ranks.AvgDPM = calculateRank(dpmVals, targetStats.AvgDPM)
+	ranks.AvgVision = calculateRank(visionVals, targetStats.AvgVisionScore)
+	ranks.AvgVSPM = calculateRank(vspmVals, targetStats.AvgVSPM)
+
+	return ranks
 }
 
 func printSummonerStats(stats *data.SummonerStats, ranks *SummonerCohortRanks) {
@@ -375,7 +402,11 @@ func printSummonerStats(stats *data.SummonerStats, ranks *SummonerCohortRanks) {
 	}
 	fmt.Printf("PUUID:         %s\n", stats.Summoner.PUUID)
 	if stats.Summoner.SummonerLevel > 0 {
-		fmt.Printf("Level:         %d\n", stats.Summoner.SummonerLevel)
+		if ranks != nil && ranks.Level.TotalCount > 1 {
+			fmt.Printf("Level:         %d (%.1f %%-tile)\n", stats.Summoner.SummonerLevel, ranks.Level.Percentile)
+		} else {
+			fmt.Printf("Level:         %d\n", stats.Summoner.SummonerLevel)
+		}
 	}
 	if !stats.EarliestMatch.IsZero() && !stats.LatestMatch.IsZero() {
 		fmt.Printf("Date Range:    %s -> %s\n", stats.EarliestMatch.Format("2006-01-02"), stats.LatestMatch.Format("2006-01-02"))
@@ -704,7 +735,34 @@ func printStats(ds *data.Dataset) {
 	}
 	fmt.Println()
 
-	// 2. Match metadata summaries: Date range, leagues, durations, side win rates
+	// 2. Player Levels Distribution & Quantiles (excluding those without profiles)
+	var playerLevels []int
+	var totalLevel int64
+	for _, s := range ds.Summoners {
+		if s != nil && s.HasProfile() && s.SummonerLevel > 0 {
+			playerLevels = append(playerLevels, int(s.SummonerLevel))
+			totalLevel += s.SummonerLevel
+		}
+	}
+	if len(playerLevels) > 0 {
+		sort.Ints(playerLevels)
+		meanLevel := float64(totalLevel) / float64(len(playerLevels))
+
+		fmt.Println("----------------------------------------------------------")
+		fmt.Println("Player Levels Distribution & Quantiles:")
+		fmt.Printf("  Min:   %d\n", playerLevels[0])
+		fmt.Printf("  p10:   %.1f\n", quantile(playerLevels, 0.10))
+		fmt.Printf("  p25:   %.1f\n", quantile(playerLevels, 0.25))
+		fmt.Printf("  p50:   %.1f (Median)\n", quantile(playerLevels, 0.50))
+		fmt.Printf("  p75:   %.1f\n", quantile(playerLevels, 0.75))
+		fmt.Printf("  p90:   %.1f\n", quantile(playerLevels, 0.90))
+		fmt.Printf("  p95:   %.1f\n", quantile(playerLevels, 0.95))
+		fmt.Printf("  p99:   %.1f\n", quantile(playerLevels, 0.99))
+		fmt.Printf("  Max:   %d\n", playerLevels[len(playerLevels)-1])
+		fmt.Printf("  Mean:  %.2f\n\n", meanLevel)
+	}
+
+	// 3. Match metadata summaries: Date range, leagues, durations, side win rates
 	var earliestDate, latestDate time.Time
 	var totalDurationSec int64
 	durations := make([]float64, 0, numMatches)
@@ -765,7 +823,7 @@ func printStats(ds *data.Dataset) {
 	}
 	fmt.Println()
 
-	// 3. Top Leagues by Matches
+	// 4. Top Leagues by Matches
 	if len(leagueCounts) > 0 {
 		type leagueStat struct {
 			league  string

@@ -260,3 +260,59 @@ func TestComputeCohortRanks(t *testing.T) {
 		t.Errorf("expected Player 3 TotalMatches rank 2 (25.0%% tied with Player 2), got rank %d (%.2f%%)", ranks3.TotalMatches.Rank, ranks3.TotalMatches.Percentile)
 	}
 }
+
+func TestComputeCohortRanks_LevelPercentile(t *testing.T) {
+	ds := data.NewDataset()
+
+	// 4 summoners with profiles: levels 30, 50, 100, 200
+	s1 := ds.GetOrCreateSummoner("puuid_1", "Player1")
+	s1.SummonerLevel = 30
+	s2 := ds.GetOrCreateSummoner("puuid_2", "Player2")
+	s2.SummonerLevel = 50
+	s3 := ds.GetOrCreateSummoner("puuid_3", "Player3")
+	s3.SummonerLevel = 100
+	s4 := ds.GetOrCreateSummoner("puuid_4", "Player4")
+	s4.SummonerLevel = 200
+
+	// 2 summoners without profiles (level 0)
+	s5 := ds.GetOrCreateSummoner("puuid_5", "Player5")
+	s5.SummonerLevel = 0
+	s6 := ds.GetOrCreateSummoner("puuid_6", "Player6")
+	s6.SummonerLevel = 0
+
+	ranks1 := computeCohortRanks(ds, s1, nil)
+	if ranks1 == nil {
+		t.Fatalf("expected ranks1 not nil")
+	}
+	if ranks1.Level.TotalCount != 4 {
+		t.Errorf("expected level cohort size 4, got %d", ranks1.Level.TotalCount)
+	}
+	if ranks1.Level.Rank != 4 || math.Abs(ranks1.Level.Percentile-0.0) > 1e-6 {
+		t.Errorf("expected Player 1 level rank 4 (0.0%%), got rank %d (%.2f%%)", ranks1.Level.Rank, ranks1.Level.Percentile)
+	}
+
+	ranks2 := computeCohortRanks(ds, s2, nil)
+	// Pos: 1 lower, 1 equal -> pos = 1 -> pct = 1/3 * 100 = 33.3333%
+	if ranks2.Level.Rank != 3 || math.Abs(ranks2.Level.Percentile-33.333333333333336) > 1e-4 {
+		t.Errorf("expected Player 2 level rank 3 (~33.3%%), got rank %d (%.2f%%)", ranks2.Level.Rank, ranks2.Level.Percentile)
+	}
+
+	ranks3 := computeCohortRanks(ds, s3, nil)
+	// Pos: 2 lower, 1 equal -> pos = 2 -> pct = 2/3 * 100 = 66.6666%
+	if ranks3.Level.Rank != 2 || math.Abs(ranks3.Level.Percentile-66.66666666666667) > 1e-4 {
+		t.Errorf("expected Player 3 level rank 2 (~66.7%%), got rank %d (%.2f%%)", ranks3.Level.Rank, ranks3.Level.Percentile)
+	}
+
+	ranks4 := computeCohortRanks(ds, s4, nil)
+	// Pos: 3 lower, 1 equal -> pos = 3 -> pct = 3/3 * 100 = 100.0%
+	if ranks4.Level.Rank != 1 || math.Abs(ranks4.Level.Percentile-100.0) > 1e-6 {
+		t.Errorf("expected Player 4 level rank 1 (100.0%%), got rank %d (%.2f%%)", ranks4.Level.Rank, ranks4.Level.Percentile)
+	}
+
+	// Summoner without profile should have zero rank
+	ranks5 := computeCohortRanks(ds, s5, nil)
+	if ranks5.Level.TotalCount != 0 {
+		t.Errorf("expected Player 5 without profile to have TotalCount 0, got %d", ranks5.Level.TotalCount)
+	}
+}
+
