@@ -62,6 +62,20 @@ func (d *Dataset) NumCrawledSummoners() int {
 	return count
 }
 
+// NumSummonersWithProfile returns the number of summoners with Summoner-V4 profile information in the dataset.
+func (d *Dataset) NumSummonersWithProfile() int {
+	if d == nil {
+		return 0
+	}
+	count := 0
+	for _, s := range d.Summoners {
+		if s != nil && s.HasProfile() {
+			count++
+		}
+	}
+	return count
+}
+
 // GetMatch looks up a match by its MatchID. Returns nil if not found.
 func (d *Dataset) GetMatch(matchID string) *MatchV5 {
 	if d.MatchIDToMatch == nil {
@@ -127,8 +141,12 @@ func (d *Dataset) AddMatch(m *MatchV5) {
 		}
 
 		name := p.SummonerName
-		if name == "" && p.RiotIDGameName != "" {
-			name = p.RiotIDGameName
+		if p.RiotIDGameName != "" {
+			if p.RiotIDTagline != "" {
+				name = p.RiotIDGameName + "#" + p.RiotIDTagline
+			} else if name == "" {
+				name = p.RiotIDGameName
+			}
 		}
 		if name == "" && p.Esports != nil {
 			name = p.Esports.PlayerName

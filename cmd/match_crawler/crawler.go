@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -140,31 +141,188 @@ func applySummonerProfile(target, src *data.SummonerV4) bool {
 		return false
 	}
 	changed := false
-	if target.Name == "" && src.Name != "" {
-		target.Name = src.Name
-		changed = true
+	if src.Name != "" {
+		if target.Name == "" || (strings.Contains(src.Name, "#") && !strings.Contains(target.Name, "#")) {
+			target.Name = src.Name
+			changed = true
+		}
 	}
-	if target.SummonerLevel == 0 && src.SummonerLevel != 0 {
+	if src.SummonerLevel != 0 && target.SummonerLevel != src.SummonerLevel {
 		target.SummonerLevel = src.SummonerLevel
 		changed = true
 	}
-	if target.AccountID == "" && src.AccountID != "" {
+	if src.AccountID != "" && target.AccountID != src.AccountID {
 		target.AccountID = src.AccountID
 		changed = true
 	}
-	if target.ID == "" && src.ID != "" {
+	if src.ID != "" && target.ID != src.ID {
 		target.ID = src.ID
 		changed = true
 	}
-	if target.ProfileIconID == 0 && src.ProfileIconID != 0 {
+	if src.ProfileIconID != 0 && target.ProfileIconID != src.ProfileIconID {
 		target.ProfileIconID = src.ProfileIconID
 		changed = true
 	}
-	if target.RevisionDate == 0 && src.RevisionDate != 0 {
+	if src.RevisionDate != 0 && target.RevisionDate != src.RevisionDate {
 		target.RevisionDate = src.RevisionDate
 		changed = true
 	}
 	return changed
+}
+
+func (c *MatchCrawler) saveCheckpoint(reason string) {
+	if c.store == nil || c.store.FilePath() == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.dataset.Saved {
+		c.mu.Unlock()
+		return
+	}
+	matches := len(c.dataset.Matches)
+	totalSummoners := len(c.dataset.Summoners)
+	crawledSummoners := c.dataset.NumCrawledSummoners()
+	profileSummoners := c.dataset.NumSummonersWithProfile()
+	err := c.store.Save(c.dataset)
+	c.mu.Unlock()
+
+	tag := "[Checkpoint]"
+	if reason != "" {
+		tag = fmt.Sprintf("[Checkpoint - %s]", reason)
+	}
+	fmt.Printf("\n%s Saving dataset (%d matches, %d players, %d crawled, %d with profile) to %s ...\n",
+		tag, matches, totalSummoners, crawledSummoners, profileSummoners, c.store.FilePath())
+	if err != nil {
+		fmt.Printf("[Checkpoint Error] Failed to save dataset: %v\n", err)
+	} else {
+		fmt.Printf("%s Saved successfully.\n", tag)
+	}
+}
+
+// fetchMissingSummonerProfiles downloads Summoner-V4 profile info (revisionDate, summonerLevel, etc.)
+// for all summoners in the dataset that do not have profile information yet.
+func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
+	c.mu.Lock()
+	var missing []*data.SummonerV4
+	for _, s := range c.dataset.Summoners {
+		if s != nil && s.PUUID != "" && !strings.HasPrefix(s.PUUID, "oe:") && !s.HasProfile() {
+			missing = append(missing, s)
+		}
+	}
+	c.mu.Unlock()
+
+	if len(missing) == 0 {
+		return nil
+	}
+
+	fmt.Printf("Fetching Summoner-V4 profile info for %d summoners without profile data...\n", len(missing))
+	updatedCount := 0
+	errorCount := 0
+	startTime := time.Now()
+
+	for i, s := range missing {
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			return ctx.Err()
+		default:
+		}
+
+		profile, err := c.client.GetSummonerByPUUID(ctx, s.PUUID)
+		if err != nil {
+			if ctx.Err() != nil {
+				fmt.Println()
+				return ctx.Err()
+			}
+			errorCount++
+			if c.cfg.Verbose {
+				fmt.Printf("\n  [Warning] Failed fetching Summoner-V4 for %s (%s): %v\n", s.PUUID, s.Name, err)
+			}
+		} else if profile != nil {
+			c.mu.Lock()
+			if applySummonerProfile(s, profile) {
+				c.dataset.Saved = false
+			}
+			c.mu.Unlock()
+			updatedCount++
+		}
+
+		elapsed := time.Since(startTime)
+		rate := float64(i+1) / elapsed.Seconds()
+		fmt.Printf("\r  [SummonerV4 Init] %d/%d (%.1f%%) in %v (%.1f req/s) | %d updated, %d errors",
+			i+1, len(missing), float64(i+1)*100.0/float64(len(missing)), elapsed.Round(time.Second), rate, updatedCount, errorCount)
+	}
+
+	fmt.Println()
+	fmt.Printf("Completed fetching Summoner-V4 profiles: %d updated, %d failed / skipped in %v.\n",
+		updatedCount, errorCount, time.Since(startTime).Round(time.Second))
+
+	// Save checkpoint immediately after completing startup profile downloads if any were updated
+	if updatedCount > 0 {
+		c.saveCheckpoint("SummonerV4 Init")
+	}
+
+	return nil
+}
+
+// fetchMissingParticipantProfiles retrieves Summoner-V4 info for any participants in the match
+// for which the dataset doesn't have profile data yet.
+func (c *MatchCrawler) fetchMissingParticipantProfiles(ctx context.Context, match *data.MatchV5) error {
+	if match == nil || match.Info.Participants == nil {
+		return nil
+	}
+
+	for _, p := range match.Info.Participants {
+		if p == nil || p.PUUID == "" || strings.HasPrefix(p.PUUID, "oe:") {
+			continue
+		}
+
+		c.mu.Lock()
+		s := c.dataset.GetSummoner(p.PUUID)
+		hasProfile := s != nil && s.HasProfile()
+		c.mu.Unlock()
+
+		if hasProfile {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		profile, err := c.client.GetSummonerByPUUID(ctx, p.PUUID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if c.cfg.Verbose {
+				fmt.Printf("  [Warning] Failed fetching Summoner-V4 for participant %s (%s): %v\n", p.PUUID, p.SummonerName, err)
+			}
+			continue
+		}
+
+		if profile != nil {
+			c.mu.Lock()
+			name := p.SummonerName
+			if p.RiotIDGameName != "" {
+				if p.RiotIDTagline != "" {
+					name = p.RiotIDGameName + "#" + p.RiotIDTagline
+				} else if name == "" {
+					name = p.RiotIDGameName
+				}
+			}
+			s := c.dataset.GetOrCreateSummoner(p.PUUID, name)
+			if applySummonerProfile(s, profile) {
+				c.dataset.Saved = false
+			}
+			p.Summoner = s
+			c.mu.Unlock()
+		}
+	}
+
+	return nil
 }
 
 // Run executes the crawler until the queue is exhausted, target max matches is reached, or ctx is canceled.
@@ -180,24 +338,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					c.mu.Lock()
-					if c.dataset.Saved {
-						c.mu.Unlock()
-						continue
-					}
-					matches := len(c.dataset.Matches)
-					totalSummoners := len(c.dataset.Summoners)
-					crawledSummoners := c.dataset.NumCrawledSummoners()
-					err := c.store.Save(c.dataset)
-					c.mu.Unlock()
-
-					fmt.Printf("[Checkpoint] Saving dataset (%d matches, %d players, %d crawled) to %s ...\n",
-						matches, totalSummoners, crawledSummoners, c.store.FilePath())
-					if err != nil {
-						fmt.Printf("[Checkpoint Error] Failed to save dataset: %v\n", err)
-					} else {
-						fmt.Printf("[Checkpoint] Saved successfully.\n")
-					}
+					c.saveCheckpoint("Periodic")
 				}
 			}
 		}()
@@ -207,6 +348,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 	initMatches := len(c.dataset.Matches)
 	initSummoners := len(c.dataset.Summoners)
 	initCrawled := c.dataset.NumCrawledSummoners()
+	initProfiles := c.dataset.NumSummonersWithProfile()
 	c.mu.Unlock()
 
 	fmt.Println("----------------------------------------------------------")
@@ -223,8 +365,13 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		fmt.Printf("  Max Matches:     Unlimited\n")
 	}
 	fmt.Printf("  Initial Queue:   %d summoners\n", c.QueueSize())
-	fmt.Printf("  Initial Dataset: %d matches, %d players (%d crawled)\n", initMatches, initSummoners, initCrawled)
+	fmt.Printf("  Initial Dataset: %d matches, %d players (%d crawled, %d with profile)\n", initMatches, initSummoners, initCrawled, initProfiles)
 	fmt.Println("----------------------------------------------------------")
+
+	// 1. Fetch Summoner-V4 profile info for all summoners in dataset missing profile data
+	if err := c.fetchMissingSummonerProfiles(ctx); err != nil {
+		return err
+	}
 
 	for {
 		select {
@@ -252,7 +399,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		// Fetch summoner profile if not fully populated
 		c.mu.Lock()
 		summoner := c.dataset.GetSummoner(puuid)
-		needProfile := (summoner == nil || summoner.Name == "" || summoner.SummonerLevel == 0)
+		needProfile := (summoner == nil || !summoner.HasProfile())
 		c.mu.Unlock()
 
 		var summonerProfile *data.SummonerV4
@@ -344,6 +491,11 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			}
 			if match == nil {
 				continue
+			}
+
+			// Immediately retrieve Summoner-V4 profile info of all participants of the match missing that info
+			if err := c.fetchMissingParticipantProfiles(ctx, match); err != nil {
+				return err
 			}
 
 			fetchedMatches = append(fetchedMatches, match)

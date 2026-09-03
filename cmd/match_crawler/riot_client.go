@@ -328,7 +328,7 @@ func (c *RiotClient) ResolveSeedToPUUID(ctx context.Context, seed string) (strin
 	return "", fmt.Errorf("unable to resolve seed %q to PUUID. Please specify as 'GameName#TagLine' (e.g. 'Faker#KR1')", seed)
 }
 
-// GetSummonerByPUUID retrieves the Summoner profile from Summoner-V4 and Account-V1.
+// GetSummonerByPUUID retrieves the Summoner profile from Summoner-V4 API.
 func (c *RiotClient) GetSummonerByPUUID(ctx context.Context, puuid string) (*data.SummonerV4, error) {
 	reqURL := fmt.Sprintf("https://%s.api.riotgames.com/lol/summoner/v4/summoners/by-puuid/%s", c.platform, puuid)
 	body, err := c.executeRequest(ctx, reqURL)
@@ -339,15 +339,6 @@ func (c *RiotClient) GetSummonerByPUUID(ctx context.Context, puuid string) (*dat
 	var summoner data.SummonerV4
 	if err := json.Unmarshal(body, &summoner); err != nil {
 		return nil, fmt.Errorf("failed to parse Summoner-V4 response: %w", err)
-	}
-
-	// Also attempt to get current Riot ID display name via Account-V1
-	accURL := fmt.Sprintf("https://%s.api.riotgames.com/riot/account/v1/accounts/by-puuid/%s", c.regional, puuid)
-	if accBody, err := c.executeRequest(ctx, accURL); err == nil {
-		var acc AccountDto
-		if err := json.Unmarshal(accBody, &acc); err == nil && acc.GameName != "" {
-			summoner.Name = fmt.Sprintf("%s#%s", acc.GameName, acc.TagLine)
-		}
 	}
 
 	return &summoner, nil

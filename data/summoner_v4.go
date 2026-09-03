@@ -38,6 +38,14 @@ type SummonerV4 struct {
 	Matches []*MatchV5 `json:"-"`
 }
 
+// HasProfile returns true if the summoner has basic Summoner-V4 profile information (such as summonerLevel or revisionDate).
+func (s *SummonerV4) HasProfile() bool {
+	if s == nil {
+		return false
+	}
+	return s.SummonerLevel > 0 || s.RevisionDate > 0
+}
+
 // AddMatch adds a match to the summoner's match history in chronological order.
 // If the match is already present (identified by MatchID), it is not re-added.
 func (s *SummonerV4) AddMatch(m *MatchV5) {

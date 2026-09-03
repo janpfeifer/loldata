@@ -156,19 +156,13 @@ func main() {
 	}
 	crawler := NewMatchCrawler(client, dataset, store, crawlerCfg)
 
-	if crawler.QueueSize() == 0 {
-		if len(dataset.Matches) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
-			flag.PrintDefaults()
-			if store != nil {
-				store.Cleanup()
-			}
-			os.Exit(1)
+	if crawler.QueueSize() == 0 && len(dataset.Matches) == 0 && len(dataset.Summoners) == 0 {
+		fmt.Fprintln(os.Stderr, "Error: no seed provided (-seed) and dataset is empty. Provide at least one seed summoner.")
+		flag.PrintDefaults()
+		if store != nil {
+			store.Cleanup()
 		}
-		fmt.Printf("Dataset loaded (%d matches, %d players, %d crawled). All summoners have already been crawled.\n",
-			len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners())
-		fmt.Println("To check for new matches or discover new summoners, specify a seed summoner using -seed.")
-		return
+		os.Exit(1)
 	}
 
 	// 9. Run crawler

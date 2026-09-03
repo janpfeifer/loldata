@@ -492,3 +492,248 @@ func TestMatchCrawler_CheckpointSkipsWhenSaved(t *testing.T) {
 	<-runDone
 }
 
+func TestMatchCrawler_StartupFetchesMissingSummonerProfiles(t *testing.T) {
+	ds := data.NewDataset()
+
+	// Summoner 1: already has profile
+	s1 := ds.GetOrCreateSummoner("p1", "Player1")
+	s1.SummonerLevel = 50
+	s1.RevisionDate = 1690000000000
+	s1.Crawled = true
+
+	// Summoner 2: missing profile
+	s2 := ds.GetOrCreateSummoner("p2", "Player2")
+	s2.Crawled = true // already crawled, but missing profile
+
+	// Summoner 3: missing profile
+	s3 := ds.GetOrCreateSummoner("p3", "Player3")
+	s3.Crawled = false
+
+	p2Fetched := false
+	p3Fetched := false
+	p1Fetched := false
+
+	mockHandler := func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/lol/summoner/v4/summoners/by-puuid/p1":
+			p1Fetched = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p1",
+				"summonerLevel": 50,
+				"revisionDate":  1690000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/p2":
+			p2Fetched = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p2",
+				"summonerLevel": 150,
+				"revisionDate":  1700000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/p3":
+			p3Fetched = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p3",
+				"summonerLevel": 220,
+				"revisionDate":  1710000000000,
+			})
+		case "/lol/match/v5/matches/by-puuid/p3/ids":
+			return jsonResponse(http.StatusOK, []string{})
+		default:
+			return jsonResponse(http.StatusOK, []string{})
+		}
+	}
+
+	client := newMockRiotClient(mockHandler)
+	crawler := NewMatchCrawler(client, ds, nil, CrawlerConfig{})
+
+	if err := crawler.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	// p1 already had profile, so it should not have been fetched
+	if p1Fetched {
+		t.Errorf("expected p1 to NOT be fetched since it already had profile")
+	}
+
+	// p2 and p3 were missing profile, so both should have been fetched
+	if !p2Fetched {
+		t.Errorf("expected p2 profile to be fetched at startup")
+	}
+	if !p3Fetched {
+		t.Errorf("expected p3 profile to be fetched at startup")
+	}
+
+	if s2.SummonerLevel != 150 || s2.RevisionDate != 1700000000000 {
+		t.Errorf("expected s2 profile updated, got level=%d, rev=%d", s2.SummonerLevel, s2.RevisionDate)
+	}
+	if s3.SummonerLevel != 220 || s3.RevisionDate != 1710000000000 {
+		t.Errorf("expected s3 profile updated, got level=%d, rev=%d", s3.SummonerLevel, s3.RevisionDate)
+	}
+}
+
+func TestMatchCrawler_ParticipantProfilesFetchedImmediatelyAfterMatch(t *testing.T) {
+	ds := data.NewDataset()
+
+	match1 := &data.MatchV5{
+		Metadata: data.MetadataDto{
+			MatchID: "NA1_5001",
+		},
+		Info: data.InfoDto{
+			GameStartTimestamp: time.Now().UnixMilli(),
+			GameDuration:       1800,
+			Participants: []*data.ParticipantDto{
+				{PUUID: "seed_puuid", SummonerName: "SeedPlayer", RiotIDGameName: "SeedPlayer", RiotIDTagline: "NA1", TeamID: 100},
+				{PUUID: "part1_puuid", SummonerName: "Part1", RiotIDGameName: "Part1", RiotIDTagline: "NA1", TeamID: 100},
+				{PUUID: "part2_puuid", SummonerName: "Part2", RiotIDGameName: "Part2", RiotIDTagline: "NA1", TeamID: 200},
+			},
+		},
+	}
+
+	part1Fetched := false
+	part2Fetched := false
+
+	mockHandler := func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/lol/summoner/v4/summoners/by-puuid/seed_puuid":
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "seed_puuid",
+				"summonerLevel": 300,
+				"revisionDate":  1705000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/part1_puuid":
+			part1Fetched = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "part1_puuid",
+				"summonerLevel": 85,
+				"revisionDate":  1706000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/part2_puuid":
+			part2Fetched = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "part2_puuid",
+				"summonerLevel": 410,
+				"revisionDate":  1707000000000,
+			})
+		case "/lol/match/v5/matches/by-puuid/seed_puuid/ids":
+			return jsonResponse(http.StatusOK, []string{"NA1_5001"})
+		case "/lol/match/v5/matches/NA1_5001":
+			return jsonResponse(http.StatusOK, match1)
+		default:
+			return jsonResponse(http.StatusOK, []string{})
+		}
+	}
+
+	client := newMockRiotClient(mockHandler)
+	cfg := CrawlerConfig{
+		SeedPUUID:  "seed_puuid",
+		MaxMatches: 1,
+	}
+
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+	if err := crawler.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if !part1Fetched {
+		t.Errorf("expected part1 profile to be fetched immediately after match retrieval")
+	}
+	if !part2Fetched {
+		t.Errorf("expected part2 profile to be fetched immediately after match retrieval")
+	}
+
+	p1 := ds.GetSummoner("part1_puuid")
+	if p1 == nil {
+		t.Fatalf("part1_puuid not found in dataset")
+	}
+	if p1.SummonerLevel != 85 || p1.RevisionDate != 1706000000000 {
+		t.Errorf("expected p1 level=85, rev=1706000000000, got level=%d, rev=%d", p1.SummonerLevel, p1.RevisionDate)
+	}
+
+	p2 := ds.GetSummoner("part2_puuid")
+	if p2 == nil {
+		t.Fatalf("part2_puuid not found in dataset")
+	}
+	if p2.SummonerLevel != 410 || p2.RevisionDate != 1707000000000 {
+		t.Errorf("expected p2 level=410, rev=1707000000000, got level=%d, rev=%d", p2.SummonerLevel, p2.RevisionDate)
+	}
+}
+
+func TestMatchCrawler_StartupCheckpointsWhileFetchingProfiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	datasetPath := filepath.Join(tmpDir, "startup_checkpoints.json")
+
+	store := NewDatasetStore(datasetPath, 3)
+	ds := data.NewDataset()
+
+	// 3 summoners missing profile
+	ds.GetOrCreateSummoner("p1", "Player1")
+	ds.GetOrCreateSummoner("p2", "Player2")
+	ds.GetOrCreateSummoner("p3", "Player3")
+
+	// Initial save
+	if err := store.Save(ds); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	proceedChan := make(chan struct{})
+	mockHandler := func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Path {
+		case "/lol/summoner/v4/summoners/by-puuid/p1":
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p1",
+				"summonerLevel": 100,
+				"revisionDate":  1700000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/p2":
+			<-proceedChan
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p2",
+				"summonerLevel": 200,
+				"revisionDate":  1700000000000,
+			})
+		case "/lol/summoner/v4/summoners/by-puuid/p3":
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "p3",
+				"summonerLevel": 300,
+				"revisionDate":  1700000000000,
+			})
+		default:
+			return jsonResponse(http.StatusOK, []string{})
+		}
+	}
+
+	client := newMockRiotClient(mockHandler)
+	cfg := CrawlerConfig{
+		CheckpointDuration: 20 * time.Millisecond,
+	}
+
+	crawler := NewMatchCrawler(client, ds, store, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan struct{})
+	go func() {
+		_ = crawler.Run(ctx)
+		close(runDone)
+	}()
+
+	// Wait for p1 to be updated and checkpoint ticker to fire while waiting on p2
+	time.Sleep(80 * time.Millisecond)
+
+	// Unblock p2 and let crawl complete
+	close(proceedChan)
+	<-runDone
+
+	// Reload from store file to verify it was saved on disk
+	loadedDs := data.NewDataset()
+	if err := store.Load(loadedDs); err != nil {
+		t.Fatalf("failed to load dataset: %v", err)
+	}
+
+	if loadedDs.NumSummonersWithProfile() != 3 {
+		t.Errorf("expected 3 summoners with profile in saved dataset, got %d", loadedDs.NumSummonersWithProfile())
+	}
+}
+
+
