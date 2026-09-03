@@ -175,8 +175,8 @@ func main() {
 	if store != nil && store.FilePath() != "" {
 		fmt.Println("----------------------------------------------------------")
 		if !dataset.Saved {
-			fmt.Printf("Saving final dataset (%d matches, %d players (%d crawled)) to %s ...\n",
-				len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), store.FilePath())
+			fmt.Printf("Saving final dataset (%d matches, %d players (%d crawled, %d with profile)) to %s ...\n",
+				len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), dataset.NumSummonersWithProfile(), store.FilePath())
 			if err := store.Save(dataset); err != nil {
 				fmt.Fprintf(os.Stderr, "Error saving dataset: %v\n", err)
 				store.Cleanup()
@@ -189,7 +189,7 @@ func main() {
 	}
 
 	fmt.Println("==========================================================")
-	fmt.Printf("Crawler finished. Total matches in dataset: %d, players: %d (%d crawled) (new matches downloaded: %d)\n",
-		len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), crawler.CrawledMatchesCount())
+	fmt.Printf("Crawler finished. Total matches in dataset: %d, players: %d (%d crawled, %d with profile) (new matches downloaded: %d)\n",
+		len(dataset.Matches), len(dataset.Summoners), dataset.NumCrawledSummoners(), dataset.NumSummonersWithProfile(), crawler.CrawledMatchesCount())
 	fmt.Println("==========================================================")
 }
