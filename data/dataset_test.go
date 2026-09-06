@@ -610,3 +610,68 @@ func TestDataset_ClearNonRanked(t *testing.T) {
 	}
 }
 
+func TestDataset_GetOrCreateSummoner_MergesByRiotID(t *testing.T) {
+	ds := data.NewDataset()
+
+	// Initial match crawled under old key
+	oldMatch := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "OLD_MATCH_1"},
+		Info: data.InfoDto{
+			Participants: []*data.ParticipantDto{
+				{PUUID: "old_puuid_123", SummonerName: "Casanova", RiotIDGameName: "Casanova", RiotIDTagline: "NA1"},
+			},
+		},
+	}
+	ds.AddMatch(oldMatch)
+
+	if len(ds.Summoners) != 1 {
+		t.Fatalf("expected 1 summoner, got %d", len(ds.Summoners))
+	}
+	s := ds.GetSummoner("old_puuid_123")
+	if s == nil {
+		t.Fatalf("expected to find summoner by old_puuid_123")
+	}
+	s.PUUIDInvalid = true // Marked invalid due to key change
+
+	// Now crawl a new match under the new API key with the new encrypted PUUID
+	newMatch := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "NEW_MATCH_2"},
+		Info: data.InfoDto{
+			Participants: []*data.ParticipantDto{
+				{PUUID: "new_puuid_456", SummonerName: "Casanova", RiotIDGameName: "Casanova", RiotIDTagline: "NA1"},
+			},
+		},
+	}
+	ds.AddMatch(newMatch)
+
+	// Verify no duplicate summoners were created!
+	if len(ds.Summoners) != 1 {
+		t.Fatalf("expected 1 summoner after merge, got %d", len(ds.Summoners))
+	}
+
+	merged := ds.Summoners[0]
+	if merged.PUUID != "new_puuid_456" {
+		t.Errorf("expected PUUID to be upgraded to new_puuid_456, got %s", merged.PUUID)
+	}
+	if merged.PUUIDInvalid {
+		t.Errorf("expected PUUIDInvalid to be cleared after upgrade")
+	}
+	if len(merged.Matches) != 2 {
+		t.Errorf("expected 2 matches merged for summoner, got %d", len(merged.Matches))
+	}
+
+	// Verify lookups
+	if ds.GetSummoner("new_puuid_456") != merged {
+		t.Errorf("expected GetSummoner(new_puuid_456) to return merged summoner")
+	}
+	if ds.GetSummoner("old_puuid_123") != nil {
+		t.Errorf("expected old PUUID to no longer exist in PUUIDToSummoner map")
+	}
+
+	// Verify old match participant was also updated
+	if oldMatch.Info.Participants[0].PUUID != "new_puuid_456" {
+		t.Errorf("expected old match participant PUUID to be updated to new_puuid_456, got %s", oldMatch.Info.Participants[0].PUUID)
+	}
+}
+
+

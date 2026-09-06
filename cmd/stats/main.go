@@ -282,7 +282,7 @@ func computeCohortRanks(ds *data.Dataset, targetSummoner *data.SummonerV4, targe
 		var levelVals []float64
 		hasTargetLevel := false
 		for _, s := range ds.Summoners {
-			if s != nil && s.HasProfile() && s.SummonerLevel > 0 {
+			if s != nil && s.SummonerLevel > 0 {
 				levelVals = append(levelVals, float64(s.SummonerLevel))
 				if s == targetSummoner || (s.PUUID != "" && s.PUUID == targetSummoner.PUUID) {
 					hasTargetLevel = true

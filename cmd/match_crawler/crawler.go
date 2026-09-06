@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +22,8 @@ type CrawlerConfig struct {
 	SeedPUUID          string
 	Refresh            bool
 	ClearNonRanked     bool
+	RankDB             *RankDatabase
+	SkipProfileSync    bool
 }
 
 // MatchCrawler coordinates crawling matches and summoners from Riot API.
@@ -27,6 +31,7 @@ type MatchCrawler struct {
 	client  *RiotClient
 	dataset *data.Dataset
 	store   *DatasetStore
+	rankDB  *RankDatabase
 	cfg     CrawlerConfig
 
 	mu                  sync.Mutex
@@ -47,6 +52,7 @@ func NewMatchCrawler(client *RiotClient, dataset *data.Dataset, store *DatasetSt
 		client:        client,
 		dataset:       dataset,
 		store:         store,
+		rankDB:        cfg.RankDB,
 		cfg:           cfg,
 		puuidQueue:    make([]string, 0),
 		queuedPUUIDs:  make(map[string]bool),
@@ -98,10 +104,13 @@ func (c *MatchCrawler) EnqueuePUUID(puuid string) {
 	if puuid == "" || c.queuedPUUIDs[puuid] || c.visitedPUUIDs[puuid] {
 		return
 	}
-	if s := c.dataset.GetSummoner(puuid); s != nil && s.Crawled {
+
+	s := c.dataset.GetSummoner(puuid)
+	if s != nil && s.Crawled {
 		c.visitedPUUIDs[puuid] = true
 		return
 	}
+
 	c.queuedPUUIDs[puuid] = true
 	c.puuidQueue = append(c.puuidQueue, puuid)
 }
@@ -173,7 +182,59 @@ func applySummonerProfile(target, src *data.SummonerV4) bool {
 		target.RevisionDate = src.RevisionDate
 		changed = true
 	}
+	if src.RankFetched {
+		if !target.RankFetched || target.RankTier != src.RankTier || target.LeaguePoints != src.LeaguePoints ||
+			target.RankWins != src.RankWins || target.RankLosses != src.RankLosses {
+			target.RankTier = src.RankTier
+			target.LeaguePoints = src.LeaguePoints
+			target.RankWins = src.RankWins
+			target.RankLosses = src.RankLosses
+			target.RankFetched = true
+			changed = true
+		}
+	}
 	return changed
+}
+
+// resolveSummonerRank fetches or looks up rank for a summoner.
+func (c *MatchCrawler) resolveSummonerRank(ctx context.Context, summonerID, puuid string) (data.RankTier, int, int, int, bool, error) {
+	// 1. Check RankDatabase first if configured
+	if c.rankDB != nil {
+		if entry := c.rankDB.Lookup(summonerID, puuid); entry != nil {
+			return entry.RankTier, entry.LeaguePoints, entry.Wins, entry.Losses, true, nil
+		}
+	}
+
+	// 2. If summonerID is empty, cannot query League-V4 entries -> mark as unranked
+	if summonerID == "" {
+		return data.RankUnranked, 0, 0, 0, true, nil
+	}
+
+	// 3. Fallback to individual League-V4 query
+	entries, err := c.client.GetLeagueEntriesBySummonerID(ctx, summonerID)
+	if err != nil {
+		return data.RankUnknown, 0, 0, 0, false, err
+	}
+
+	if len(entries) == 0 {
+		// Player has no ranked games -> Unranked
+		return data.RankUnranked, 0, 0, 0, true, nil
+	}
+
+	// Look for RANKED_SOLO_5x5 first, fallback to first entry
+	var chosen *LeagueEntryDto
+	for i := range entries {
+		if entries[i].QueueType == "RANKED_SOLO_5x5" {
+			chosen = &entries[i]
+			break
+		}
+	}
+	if chosen == nil && len(entries) > 0 {
+		chosen = &entries[0]
+	}
+
+	tier := data.ParseRankTier(chosen.Tier, chosen.Rank)
+	return tier, chosen.LeaguePoints, chosen.Wins, chosen.Losses, true, nil
 }
 
 func (c *MatchCrawler) saveCheckpoint(reason string) {
@@ -205,28 +266,117 @@ func (c *MatchCrawler) saveCheckpoint(reason string) {
 	}
 }
 
+// migrateSummonerPUUID attempts to resolve a summoner's new encrypted PUUID using their Riot ID (gameName#tagLine).
+// If found, it updates the summoner and re-indexes the dataset.
+// If the Riot ID is unknown or the account cannot be found (HTTP 404), it marks ProfileUnavailable = true.
+func (c *MatchCrawler) migrateSummonerPUUID(ctx context.Context, s *data.SummonerV4) (*data.SummonerV4, error) {
+	if s == nil {
+		return nil, nil
+	}
+	defaultTag := strings.ToUpper(c.client.Platform())
+	gameName, tagLine := s.RiotID(defaultTag)
+	if gameName == "" {
+		c.mu.Lock()
+		s.ProfileUnavailable = true
+		s.PUUIDInvalid = false
+		c.dataset.Saved = false
+		c.mu.Unlock()
+		return nil, nil
+	}
+
+	acc, err := c.client.GetAccountByRiotID(ctx, gameName, tagLine)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			c.mu.Lock()
+			s.ProfileUnavailable = true
+			s.PUUIDInvalid = false
+			c.dataset.Saved = false
+			c.mu.Unlock()
+			return nil, nil
+		}
+		c.mu.Lock()
+		s.PUUIDInvalid = true
+		c.dataset.Saved = false
+		c.mu.Unlock()
+		return nil, err
+	}
+
+	if acc != nil && acc.PUUID != "" {
+		c.mu.Lock()
+		updated := c.dataset.UpdateSummonerPUUID(s, acc.PUUID)
+		c.dataset.Saved = false
+		c.mu.Unlock()
+		return updated, nil
+	}
+	return nil, nil
+}
+
 // fetchMissingSummonerProfiles downloads Summoner-V4 profile info (revisionDate, summonerLevel, etc.)
-// for all summoners in the dataset that do not have profile information yet.
+// and rank details for all summoners in the dataset that do not have complete profile information yet.
+// If any summoner has PUUIDInvalid (e.g. from an API key migration), it resolves their new PUUID via Riot ID first.
 func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
 	c.mu.Lock()
-	var missing []*data.SummonerV4
+	var toUpdate []*data.SummonerV4
 	for _, s := range c.dataset.Summoners {
-		if s != nil && s.PUUID != "" && !strings.HasPrefix(s.PUUID, "oe:") && !s.HasProfile() {
-			missing = append(missing, s)
+		if s != nil && s.PUUID != "" && !strings.HasPrefix(s.PUUID, "oe:") && (s.PUUIDInvalid || s.NeedsProfile()) {
+			toUpdate = append(toUpdate, s)
 		}
 	}
+	// Prioritize summoners with the most matches in the dataset so the most matches become complete and usable first
+	sort.Slice(toUpdate, func(i, j int) bool {
+		return len(toUpdate[i].Matches) > len(toUpdate[j].Matches)
+	})
 	c.mu.Unlock()
 
-	if len(missing) == 0 {
+	if len(toUpdate) == 0 {
 		return nil
 	}
 
-	fmt.Printf("Fetching Summoner-V4 profile info for %d summoners without profile data...\n", len(missing))
-	updatedCount := 0
+	// Canary check: probe a sample summoner missing level/revisionDate to detect if the API key encryption context changed
+	// or if the API key is unauthorized/expired (HTTP 401/403), avoiding thousands of failed requests.
+	probed := 0
+	for _, testSummoner := range toUpdate {
+		if probed >= 3 {
+			break
+		}
+		if testSummoner == nil || testSummoner.PUUID == "" || testSummoner.PUUIDInvalid || testSummoner.SummonerLevel > 0 || testSummoner.RevisionDate > 0 {
+			continue
+		}
+		probed++
+		_, err := c.client.GetSummonerByPUUID(ctx, testSummoner.PUUID)
+		if err != nil {
+			if errors.Is(err, ErrUnauthorized) {
+				fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+				return err
+			}
+			if errors.Is(err, ErrDecryptionMismatch) {
+				fmt.Printf("\n[Application Key Mismatch Detected]\n")
+				fmt.Printf("  The PUUIDs in this dataset were encrypted with a different API key/project than the current one.\n")
+				fmt.Printf("  Riot cannot decrypt these %d legacy summoner PUUIDs with your current key.\n", len(toUpdate))
+				fmt.Printf("  Marking %d legacy summoners as 'PUUIDInvalid' so they will be migrated via Riot ID...\n", len(toUpdate))
+				c.mu.Lock()
+				for _, s := range toUpdate {
+					s.PUUIDInvalid = true
+				}
+				c.dataset.Saved = false
+				c.mu.Unlock()
+				c.saveCheckpoint("Key Mismatch Detected")
+				break
+			}
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+		}
+		break
+	}
+
+	fmt.Printf("Syncing Summoner PUUIDs and profiles for %d summoners...\n", len(toUpdate))
+	updatedProfileCount := 0
+	migratedPUUIDCount := 0
 	errorCount := 0
 	startTime := time.Now()
 
-	for i, s := range missing {
+	for i, s := range toUpdate {
 		select {
 		case <-ctx.Done():
 			fmt.Println()
@@ -234,38 +384,137 @@ func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
 		default:
 		}
 
-		profile, err := c.client.GetSummonerByPUUID(ctx, s.PUUID)
-		if err != nil {
-			if ctx.Err() != nil {
-				fmt.Println()
-				return ctx.Err()
+		// 1. Update PUUID if it is marked invalid (migrate using Riot ID)
+		if s.PUUIDInvalid {
+			migrated, err := c.migrateSummonerPUUID(ctx, s)
+			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println()
+					return ctx.Err()
+				}
+				if errors.Is(err, ErrUnauthorized) {
+					fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+					return err
+				}
+				errorCount++
+				if c.cfg.Verbose {
+					gameName, tagLine := s.RiotID(strings.ToUpper(c.client.Platform()))
+					fmt.Printf("\n  [Warning] Failed resolving Riot ID %s#%s: %v\n", gameName, tagLine, err)
+				}
+			} else if migrated != nil {
+				s = migrated
+				migratedPUUIDCount++
 			}
-			errorCount++
-			if c.cfg.Verbose {
-				fmt.Printf("\n  [Warning] Failed fetching Summoner-V4 for %s (%s): %v\n", s.PUUID, s.Name, err)
+		}
+
+		// 2. Download profile if needed
+		profileUpdated := false
+		if !s.PUUIDInvalid && !s.ProfileUnavailable && s.NeedsProfile() {
+			if s.SummonerLevel == 0 && s.RevisionDate == 0 {
+				profile, err := c.client.GetSummonerByPUUID(ctx, s.PUUID)
+				if err != nil {
+					if ctx.Err() != nil {
+						fmt.Println()
+						return ctx.Err()
+					}
+					if errors.Is(err, ErrUnauthorized) {
+						fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+						return err
+					}
+					if errors.Is(err, ErrDecryptionMismatch) {
+						// Immediately attempt to migrate this summoner via Riot ID
+						migrated, mErr := c.migrateSummonerPUUID(ctx, s)
+						if mErr != nil {
+							if errors.Is(mErr, ErrUnauthorized) {
+								fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", mErr)
+								return mErr
+							}
+							errorCount++
+						} else if migrated != nil {
+							s = migrated
+							migratedPUUIDCount++
+							// Retry fetching profile with newly migrated PUUID
+							if p2, pErr := c.client.GetSummonerByPUUID(ctx, s.PUUID); pErr == nil && p2 != nil {
+								c.mu.Lock()
+								if applySummonerProfile(s, p2) {
+									c.dataset.Saved = false
+									profileUpdated = true
+								}
+								c.mu.Unlock()
+							}
+						}
+					} else if errors.Is(err, ErrNotFound) {
+						c.mu.Lock()
+						s.ProfileUnavailable = true
+						c.dataset.Saved = false
+						c.mu.Unlock()
+					} else {
+						errorCount++
+						if c.cfg.Verbose {
+							fmt.Printf("\n  [Warning] Failed fetching Summoner-V4 for %s (%s): %v\n", s.PUUID, s.Name, err)
+						}
+					}
+				} else if profile != nil {
+					c.mu.Lock()
+					if applySummonerProfile(s, profile) {
+						c.dataset.Saved = false
+						profileUpdated = true
+					}
+					c.mu.Unlock()
+				}
 			}
-		} else if profile != nil {
-			c.mu.Lock()
-			if applySummonerProfile(s, profile) {
-				c.dataset.Saved = false
+
+			if !s.RankFetched && !s.PUUIDInvalid && !s.ProfileUnavailable {
+				tier, lp, wins, losses, fetched, err := c.resolveSummonerRank(ctx, s.ID, s.PUUID)
+				if err != nil {
+					if ctx.Err() != nil {
+						fmt.Println()
+						return ctx.Err()
+					}
+					if errors.Is(err, ErrUnauthorized) {
+						fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+						return err
+					}
+					if errors.Is(err, ErrDecryptionMismatch) {
+						c.mu.Lock()
+						s.PUUIDInvalid = true
+						c.dataset.Saved = false
+						c.mu.Unlock()
+					}
+					errorCount++
+					if c.cfg.Verbose {
+						fmt.Printf("\n  [Warning] Failed fetching League-V4 for %s (%s): %v\n", s.PUUID, s.Name, err)
+					}
+				} else if fetched {
+					c.mu.Lock()
+					s.RankTier = tier
+					s.LeaguePoints = lp
+					s.RankWins = wins
+					s.RankLosses = losses
+					s.RankFetched = true
+					c.dataset.Saved = false
+					c.mu.Unlock()
+					profileUpdated = true
+				}
 			}
-			c.mu.Unlock()
-			updatedCount++
+		}
+
+		if profileUpdated {
+			updatedProfileCount++
 		}
 
 		elapsed := time.Since(startTime)
 		rate := float64(i+1) / elapsed.Seconds()
-		fmt.Printf("\r  [SummonerV4 Init] %d/%d (%.1f%%) in %v (%.1f req/s) | %d updated, %d errors",
-			i+1, len(missing), float64(i+1)*100.0/float64(len(missing)), elapsed.Round(time.Second), rate, updatedCount, errorCount)
+		fmt.Printf("\r  [Summoner Profile Sync] %d/%d (%.1f%%) in %v (%.1f req/s) | %d profiles updated, %d PUUIDs migrated, %d errors",
+			i+1, len(toUpdate), float64(i+1)*100.0/float64(len(toUpdate)), elapsed.Round(time.Second), rate, updatedProfileCount, migratedPUUIDCount, errorCount)
 	}
 
 	fmt.Println()
-	fmt.Printf("Completed fetching Summoner-V4 profiles: %d updated, %d failed / skipped in %v.\n",
-		updatedCount, errorCount, time.Since(startTime).Round(time.Second))
+	fmt.Printf("Completed Summoner sync: %d profiles updated, %d PUUIDs migrated, %d errors in %v.\n",
+		updatedProfileCount, migratedPUUIDCount, errorCount, time.Since(startTime).Round(time.Second))
 
-	// Save checkpoint immediately after completing startup profile downloads if any were updated
-	if updatedCount > 0 {
-		c.saveCheckpoint("SummonerV4 Init")
+	if updatedProfileCount > 0 || migratedPUUIDCount > 0 {
+		c.saveCheckpoint("Summoner Profile Sync")
 	}
 
 	return nil
@@ -298,10 +547,11 @@ func (c *MatchCrawler) fetchMissingParticipantProfiles(ctx context.Context, matc
 
 		c.mu.Lock()
 		s := c.dataset.GetSummoner(p.PUUID)
-		hasProfile := s != nil && s.HasProfile()
+		canSkip := s != nil && !s.NeedsProfile()
 		c.mu.Unlock()
 
-		if hasProfile {
+		if canSkip {
+			p.Summoner = s
 			continue
 		}
 
@@ -312,36 +562,93 @@ func (c *MatchCrawler) fetchMissingParticipantProfiles(ctx context.Context, matc
 		default:
 		}
 
-		profile, err := c.client.GetSummonerByPUUID(ctx, p.PUUID)
-		if err != nil {
-			if ctx.Err() != nil {
-				fmt.Println()
-				return ctx.Err()
+		c.mu.Lock()
+		name := p.SummonerName
+		if p.RiotIDGameName != "" {
+			if p.RiotIDTagline != "" {
+				name = p.RiotIDGameName + "#" + p.RiotIDTagline
+			} else if name == "" {
+				name = p.RiotIDGameName
 			}
-			if c.cfg.Verbose {
-				fmt.Printf("\n  [Warning] Failed fetching Summoner-V4 for participant %s (%s): %v\n", p.PUUID, p.SummonerName, err)
+		}
+		s = c.dataset.GetOrCreateSummoner(p.PUUID, name)
+		needLevel := s.SummonerLevel == 0 && s.RevisionDate == 0
+		needRank := !s.RankFetched
+		c.mu.Unlock()
+
+		if needLevel && s.NeedsProfile() {
+			profile, err := c.client.GetSummonerByPUUID(ctx, p.PUUID)
+			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println()
+					return ctx.Err()
+				}
+				if errors.Is(err, ErrUnauthorized) {
+					fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+					return err
+				}
+				if errors.Is(err, ErrDecryptionMismatch) {
+					c.mu.Lock()
+					s.PUUIDInvalid = true
+					c.dataset.Saved = false
+					c.mu.Unlock()
+				} else if errors.Is(err, ErrNotFound) {
+					c.mu.Lock()
+					s.ProfileUnavailable = true
+					c.dataset.Saved = false
+					c.mu.Unlock()
+				} else if c.cfg.Verbose {
+					fmt.Printf("\n  [Warning] Failed fetching Summoner-V4 for participant %s (%s): %v\n", p.PUUID, p.SummonerName, err)
+				}
+			} else if profile != nil {
+				c.mu.Lock()
+				if applySummonerProfile(s, profile) {
+					c.dataset.Saved = false
+				}
+				c.mu.Unlock()
 			}
-			continue
 		}
 
-		if profile != nil {
-			c.mu.Lock()
-			name := p.SummonerName
-			if p.RiotIDGameName != "" {
-				if p.RiotIDTagline != "" {
-					name = p.RiotIDGameName + "#" + p.RiotIDTagline
-				} else if name == "" {
-					name = p.RiotIDGameName
+		if needRank && s.NeedsProfile() {
+			tier, lp, wins, losses, fetched, err := c.resolveSummonerRank(ctx, s.ID, s.PUUID)
+			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println()
+					return ctx.Err()
 				}
-			}
-			s := c.dataset.GetOrCreateSummoner(p.PUUID, name)
-			if applySummonerProfile(s, profile) {
+				if errors.Is(err, ErrUnauthorized) {
+					fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+					return err
+				}
+				if errors.Is(err, ErrDecryptionMismatch) {
+					c.mu.Lock()
+					s.PUUIDInvalid = true
+					c.dataset.Saved = false
+					c.mu.Unlock()
+				} else if errors.Is(err, ErrNotFound) {
+					c.mu.Lock()
+					s.ProfileUnavailable = true
+					c.dataset.Saved = false
+					c.mu.Unlock()
+				} else if c.cfg.Verbose {
+					fmt.Printf("\n  [Warning] Failed fetching League-V4 for participant %s (%s): %v\n", p.PUUID, p.SummonerName, err)
+				}
+			} else if fetched {
+				c.mu.Lock()
+				s.RankTier = tier
+				s.LeaguePoints = lp
+				s.RankWins = wins
+				s.RankLosses = losses
+				s.RankFetched = true
 				c.dataset.Saved = false
+				c.mu.Unlock()
 			}
-			p.Summoner = s
-			c.mu.Unlock()
-			c.printCrawlProgress()
 		}
+
+		c.mu.Lock()
+		p.Summoner = s
+		c.mu.Unlock()
+		c.printCrawlProgress()
 	}
 
 	return nil
@@ -390,9 +697,11 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 	fmt.Printf("  Initial Dataset: %d matches, %d players (%d crawled, %d with profile)\n", initMatches, initSummoners, initCrawled, initProfiles)
 	fmt.Println("----------------------------------------------------------")
 
-	// 1. Fetch Summoner-V4 profile info for all summoners in dataset missing profile data
-	if err := c.fetchMissingSummonerProfiles(ctx); err != nil {
-		return err
+	// 1. Prioritize crawling missing profiles for summoners in dataset missing profile data
+	if !c.cfg.SkipProfileSync {
+		if err := c.fetchMissingSummonerProfiles(ctx); err != nil {
+			return err
+		}
 	}
 
 	c.printCrawlProgress()
@@ -424,16 +733,62 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 		// Fetch summoner profile if not fully populated
 		c.mu.Lock()
 		summoner := c.dataset.GetSummoner(puuid)
-		needProfile := (summoner == nil || !summoner.HasProfile())
+		needProfile := (summoner == nil || summoner.NeedsProfile())
 		c.mu.Unlock()
 
 		var summonerProfile *data.SummonerV4
 		if needProfile {
-			if s, err := c.client.GetSummonerByPUUID(ctx, puuid); err == nil && s != nil {
+			s, err := c.client.GetSummonerByPUUID(ctx, puuid)
+			if err != nil {
+				if ctx.Err() != nil {
+					fmt.Println()
+					return ctx.Err()
+				}
+				if errors.Is(err, ErrUnauthorized) {
+					fmt.Printf("\n[FATAL] Riot API key is unauthorized or expired (HTTP 401/403): %v\n", err)
+					return err
+				}
+				if errors.Is(err, ErrDecryptionMismatch) {
+					c.mu.Lock()
+					if existing := c.dataset.GetSummoner(puuid); existing != nil {
+						existing.PUUIDInvalid = true
+						c.dataset.Saved = false
+					}
+					c.mu.Unlock()
+				} else if errors.Is(err, ErrNotFound) {
+					c.mu.Lock()
+					if existing := c.dataset.GetSummoner(puuid); existing != nil {
+						existing.ProfileUnavailable = true
+						c.dataset.Saved = false
+					}
+					c.mu.Unlock()
+				}
+			} else if s != nil {
 				summonerProfile = s
-			} else if ctx.Err() != nil {
-				fmt.Println()
-				return ctx.Err()
+			}
+			if summonerProfile != nil && !summonerProfile.RankFetched {
+				tier, lp, wins, losses, fetched, err := c.resolveSummonerRank(ctx, summonerProfile.ID, puuid)
+				if err != nil && ctx.Err() != nil {
+					fmt.Println()
+					return ctx.Err()
+				}
+				if fetched {
+					summonerProfile.RankTier = tier
+					summonerProfile.LeaguePoints = lp
+					summonerProfile.RankWins = wins
+					summonerProfile.RankLosses = losses
+					summonerProfile.RankFetched = true
+				}
+			}
+		}
+
+		c.mu.Lock()
+		summoner = c.dataset.GetSummoner(puuid)
+		c.mu.Unlock()
+		if summoner != nil && summoner.PUUIDInvalid {
+			migrated, mErr := c.migrateSummonerPUUID(ctx, summoner)
+			if mErr == nil && migrated != nil {
+				puuid = migrated.PUUID
 			}
 		}
 
@@ -444,10 +799,24 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				fmt.Println()
 				return ctx.Err()
 			}
-			if c.cfg.Verbose {
-				fmt.Printf("\n[Error] Failed fetching match IDs for summoner %s: %v\n", puuid, err)
+			if errors.Is(err, ErrDecryptionMismatch) {
+				c.mu.Lock()
+				s := c.dataset.GetSummoner(puuid)
+				c.mu.Unlock()
+				if s != nil {
+					migrated, mErr := c.migrateSummonerPUUID(ctx, s)
+					if mErr == nil && migrated != nil {
+						puuid = migrated.PUUID
+						matchIDs, err = c.client.GetMatchIDsByPUUID(ctx, puuid, c.cfg.StartTime, c.cfg.EndTime, 0)
+					}
+				}
 			}
-			continue
+			if err != nil {
+				if c.cfg.Verbose {
+					fmt.Printf("\n[Error] Failed fetching match IDs for summoner %s: %v\n", puuid, err)
+				}
+				continue
+			}
 		}
 
 		if len(matchIDs) == 0 {
@@ -516,7 +885,7 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				continue
 			}
 
-			// Immediately retrieve Summoner-V4 profile info of all participants of the match missing that info
+			// Immediately retrieve Summoner profile and rank info for all participants of this match
 			if err := c.fetchMissingParticipantProfiles(ctx, match); err != nil {
 				return err
 			}

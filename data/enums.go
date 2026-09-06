@@ -148,3 +148,158 @@ const (
 	// DragonTypeElder represents the Elder Dragon.
 	DragonTypeElder
 )
+
+// RankTier represents a player's merged competitive rank tier and division in League of Legends.
+//
+//go:generate go tool enumer -type=RankTier -json -text -yaml -values -output=gen_ranktier_enumer.go
+type RankTier int
+
+const (
+	// RankUnknown indicates an unspecified rank.
+	RankUnknown RankTier = iota
+	// RankUnranked indicates the player has no ranked games / unranked.
+	RankUnranked
+	Iron_4
+	Iron_3
+	Iron_2
+	Iron_1
+	Bronze_4
+	Bronze_3
+	Bronze_2
+	Bronze_1
+	Silver_4
+	Silver_3
+	Silver_2
+	Silver_1
+	Gold_4
+	Gold_3
+	Gold_2
+	Gold_1
+	Platinum_4
+	Platinum_3
+	Platinum_2
+	Platinum_1
+	Emerald_4
+	Emerald_3
+	Emerald_2
+	Emerald_1
+	Diamond_4
+	Diamond_3
+	Diamond_2
+	Diamond_1
+	Master
+	GrandMaster
+	Challenger
+)
+
+// ParseRankTier parses a Riot API tier string (e.g. "DIAMOND", "GOLD") and division string (e.g. "I", "II", "III", "IV")
+// into a merged RankTier enum.
+func ParseRankTier(tier, division string) RankTier {
+	tier = strings.TrimSpace(strings.ToUpper(tier))
+	division = strings.TrimSpace(strings.ToUpper(division))
+
+	switch tier {
+	case "CHALLENGER":
+		return Challenger
+	case "GRANDMASTER", "GRAND_MASTER":
+		return GrandMaster
+	case "MASTER":
+		return Master
+	case "DIAMOND":
+		switch division {
+		case "I", "1":
+			return Diamond_1
+		case "II", "2":
+			return Diamond_2
+		case "III", "3":
+			return Diamond_3
+		case "IV", "4":
+			return Diamond_4
+		default:
+			return Diamond_4
+		}
+	case "EMERALD":
+		switch division {
+		case "I", "1":
+			return Emerald_1
+		case "II", "2":
+			return Emerald_2
+		case "III", "3":
+			return Emerald_3
+		case "IV", "4":
+			return Emerald_4
+		default:
+			return Emerald_4
+		}
+	case "PLATINUM":
+		switch division {
+		case "I", "1":
+			return Platinum_1
+		case "II", "2":
+			return Platinum_2
+		case "III", "3":
+			return Platinum_3
+		case "IV", "4":
+			return Platinum_4
+		default:
+			return Platinum_4
+		}
+	case "GOLD":
+		switch division {
+		case "I", "1":
+			return Gold_1
+		case "II", "2":
+			return Gold_2
+		case "III", "3":
+			return Gold_3
+		case "IV", "4":
+			return Gold_4
+		default:
+			return Gold_4
+		}
+	case "SILVER":
+		switch division {
+		case "I", "1":
+			return Silver_1
+		case "II", "2":
+			return Silver_2
+		case "III", "3":
+			return Silver_3
+		case "IV", "4":
+			return Silver_4
+		default:
+			return Silver_4
+		}
+	case "BRONZE":
+		switch division {
+		case "I", "1":
+			return Bronze_1
+		case "II", "2":
+			return Bronze_2
+		case "III", "3":
+			return Bronze_3
+		case "IV", "4":
+			return Bronze_4
+		default:
+			return Bronze_4
+		}
+	case "IRON":
+		switch division {
+		case "I", "1":
+			return Iron_1
+		case "II", "2":
+			return Iron_2
+		case "III", "3":
+			return Iron_3
+		case "IV", "4":
+			return Iron_4
+		default:
+			return Iron_4
+		}
+	case "UNRANKED":
+		return RankUnranked
+	default:
+		return RankUnknown
+	}
+}
+

@@ -20,6 +20,8 @@ var (
 	ErrNotFound = errors.New("resource not found")
 	// ErrUnauthorized indicates an invalid or expired Riot API key (HTTP 401/403).
 	ErrUnauthorized = errors.New("unauthorized / invalid Riot API key")
+	// ErrDecryptionMismatch indicates a PUUID/ID was encrypted for a different API key (HTTP 400 Decryption Exception).
+	ErrDecryptionMismatch = errors.New("identifier encrypted with different API key")
 )
 
 // Platform aliases map common platform/region names (e.g. "euw", "eune", "na") to canonical Riot platform IDs.
@@ -253,6 +255,13 @@ func (c *RiotClient) executeRequest(ctx context.Context, reqURL string) ([]byte,
 				continue
 			}
 
+		case http.StatusBadRequest:
+			bodyStr := strings.TrimSpace(string(body))
+			if strings.Contains(bodyStr, "Exception decrypting") {
+				return nil, fmt.Errorf("%w: %s", ErrDecryptionMismatch, bodyStr)
+			}
+			return nil, fmt.Errorf("unexpected HTTP status 400: %s", bodyStr)
+
 		default:
 			return nil, fmt.Errorf("unexpected HTTP status %d: %s", resp.StatusCode, string(body))
 		}
@@ -268,6 +277,21 @@ type AccountDto struct {
 	TagLine  string `json:"tagLine"`
 }
 
+// GetAccountByRiotID retrieves account details (including new encrypted PUUID) using Riot ID gameName and tagLine.
+func (c *RiotClient) GetAccountByRiotID(ctx context.Context, gameName, tagLine string) (*AccountDto, error) {
+	reqURL := fmt.Sprintf("https://%s.api.riotgames.com/riot/account/v1/accounts/by-riot-id/%s/%s",
+		c.regional, url.PathEscape(gameName), url.PathEscape(tagLine))
+	body, err := c.executeRequest(ctx, reqURL)
+	if err != nil {
+		return nil, err
+	}
+	var acc AccountDto
+	if err := json.Unmarshal(body, &acc); err != nil {
+		return nil, fmt.Errorf("failed to parse account response: %w", err)
+	}
+	return &acc, nil
+}
+
 // ResolveSeedToPUUID converts a seed string (Riot ID 'Name#Tag', PUUID, or summoner name) into a PUUID.
 func (c *RiotClient) ResolveSeedToPUUID(ctx context.Context, seed string) (string, error) {
 	seed = strings.TrimSpace(seed)
@@ -278,18 +302,9 @@ func (c *RiotClient) ResolveSeedToPUUID(ctx context.Context, seed string) (strin
 	// 1. If seed contains '#', look up by Riot ID
 	if strings.Contains(seed, "#") {
 		parts := strings.SplitN(seed, "#", 2)
-		gameName := url.PathEscape(parts[0])
-		tagLine := url.PathEscape(parts[1])
-
-		reqURL := fmt.Sprintf("https://%s.api.riotgames.com/riot/account/v1/accounts/by-riot-id/%s/%s", c.regional, gameName, tagLine)
-		body, err := c.executeRequest(ctx, reqURL)
+		acc, err := c.GetAccountByRiotID(ctx, parts[0], parts[1])
 		if err != nil {
 			return "", fmt.Errorf("failed to lookup Riot ID %q: %w", seed, err)
-		}
-
-		var acc AccountDto
-		if err := json.Unmarshal(body, &acc); err != nil {
-			return "", fmt.Errorf("failed to parse account response: %w", err)
 		}
 		return acc.PUUID, nil
 	}
@@ -432,3 +447,100 @@ func (c *RiotClient) GetMatch(ctx context.Context, matchID string) (*data.MatchV
 
 	return &match, nil
 }
+
+// LeagueEntryDto represents a player's league standing in a ranked queue.
+type LeagueEntryDto struct {
+	LeagueID     string `json:"leagueId"`
+	SummonerID   string `json:"summonerId"`
+	PUUID        string `json:"puuid,omitempty"`
+	QueueType    string `json:"queueType"`
+	Tier         string `json:"tier"`
+	Rank         string `json:"rank"`
+	LeaguePoints int    `json:"leaguePoints"`
+	Wins         int    `json:"wins"`
+	Losses       int    `json:"losses"`
+	HotStreak    bool   `json:"hotStreak"`
+	Veteran      bool   `json:"veteran"`
+	FreshBlood   bool   `json:"freshBlood"`
+	Inactive     bool   `json:"inactive"`
+}
+
+// LeagueItemDto represents an individual player entry in an apex league list.
+type LeagueItemDto struct {
+	SummonerID   string `json:"summonerId"`
+	PUUID        string `json:"puuid,omitempty"`
+	LeaguePoints int    `json:"leaguePoints"`
+	Rank         string `json:"rank"`
+	Wins         int    `json:"wins"`
+	Losses       int    `json:"losses"`
+	Veteran      bool   `json:"veteran"`
+	Inactive     bool   `json:"inactive"`
+	FreshBlood   bool   `json:"freshBlood"`
+	HotStreak    bool   `json:"hotStreak"`
+}
+
+// LeagueListDto represents an apex league (Challenger, Grandmaster, Master).
+type LeagueListDto struct {
+	LeagueID string          `json:"leagueId"`
+	Entries  []LeagueItemDto `json:"entries"`
+	Tier     string          `json:"tier"`
+	Name     string          `json:"name"`
+	Queue    string          `json:"queue"`
+}
+
+// GetLeagueEntriesBySummonerID retrieves ranked league entries for a summoner by encrypted summoner ID.
+func (c *RiotClient) GetLeagueEntriesBySummonerID(ctx context.Context, summonerID string) ([]LeagueEntryDto, error) {
+	reqURL := fmt.Sprintf("https://%s.api.riotgames.com/lol/league/v4/entries/by-summoner/%s", c.platform, summonerID)
+	body, err := c.executeRequest(ctx, reqURL)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var entries []LeagueEntryDto
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse League-V4 entries response: %w", err)
+	}
+
+	return entries, nil
+}
+
+// GetApexLeague retrieves the full apex league ladder for a tier ("challenger", "grandmaster", "master").
+func (c *RiotClient) GetApexLeague(ctx context.Context, tier string, queue string) (*LeagueListDto, error) {
+	tierLower := strings.ToLower(strings.TrimSpace(tier))
+	reqURL := fmt.Sprintf("https://%s.api.riotgames.com/lol/league/v4/%sleagues/by-queue/%s", c.platform, tierLower, queue)
+	body, err := c.executeRequest(ctx, reqURL)
+	if err != nil {
+		return nil, err
+	}
+
+	var list LeagueListDto
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("failed to parse %s league list: %w", tier, err)
+	}
+
+	return &list, nil
+}
+
+// GetLeagueEntriesPage retrieves a page of ranked league entries for a tier and division (up to 205 entries per page).
+func (c *RiotClient) GetLeagueEntriesPage(ctx context.Context, queue, tier, division string, page int) ([]LeagueEntryDto, error) {
+	reqURL := fmt.Sprintf("https://%s.api.riotgames.com/lol/league/v4/entries/%s/%s/%s?page=%d",
+		c.platform, queue, strings.ToUpper(tier), strings.ToUpper(division), page)
+	body, err := c.executeRequest(ctx, reqURL)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var entries []LeagueEntryDto
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse league entries page %d for %s %s: %w", page, tier, division, err)
+	}
+
+	return entries, nil
+}
+

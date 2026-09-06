@@ -503,6 +503,7 @@ func TestMatchCrawler_StartupFetchesMissingSummonerProfiles(t *testing.T) {
 	s1 := ds.GetOrCreateSummoner("p1", "Player1")
 	s1.SummonerLevel = 50
 	s1.RevisionDate = 1690000000000
+	s1.RankFetched = true
 	s1.Crawled = true
 
 	// Summoner 2: missing profile
@@ -796,5 +797,385 @@ func TestMatchCrawler_ClearNonRanked(t *testing.T) {
 		}
 	}
 }
+
+func TestRankDatabase_SaveAndLoad(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_rank_db.json.gz")
+
+	db := NewRankDatabase(dbPath)
+	db.Add(&RankEntry{
+		SummonerID:   "sum_123",
+		PUUID:        "puuid_123",
+		RankTier:     data.Diamond_2,
+		LeaguePoints: 75,
+		Wins:         100,
+		Losses:       80,
+	})
+	db.Add(&RankEntry{
+		SummonerID:   "sum_456",
+		PUUID:        "puuid_456",
+		RankTier:     data.Challenger,
+		LeaguePoints: 850,
+		Wins:         200,
+		Losses:       120,
+	})
+
+	if err := db.Save(); err != nil {
+		t.Fatalf("failed to save RankDatabase: %v", err)
+	}
+
+	loadedDB := NewRankDatabase(dbPath)
+	if err := loadedDB.Load(); err != nil {
+		t.Fatalf("failed to load RankDatabase: %v", err)
+	}
+
+	if loadedDB.Size() != 2 {
+		t.Fatalf("expected 2 entries in loaded DB, got %d", loadedDB.Size())
+	}
+
+	entry1 := loadedDB.Lookup("sum_123", "")
+	if entry1 == nil || entry1.RankTier != data.Diamond_2 || entry1.LeaguePoints != 75 {
+		t.Errorf("lookup by summonerID failed: got %+v", entry1)
+	}
+
+	entry2 := loadedDB.Lookup("", "puuid_456")
+	if entry2 == nil || entry2.RankTier != data.Challenger || entry2.LeaguePoints != 850 {
+		t.Errorf("lookup by puuid failed: got %+v", entry2)
+	}
+}
+
+func TestMatchCrawler_UsesRankDB(t *testing.T) {
+	ds := data.NewDataset()
+	s := ds.GetOrCreateSummoner("puuid_1", "Player1")
+	s.SummonerLevel = 50
+	s.RevisionDate = 1700000000000
+	s.ID = "sum_1"
+	// Rank is not fetched yet
+	s.RankFetched = false
+
+	rankDB := NewRankDatabase("")
+	rankDB.Add(&RankEntry{
+		SummonerID:   "sum_1",
+		PUUID:        "puuid_1",
+		RankTier:     data.Emerald_1,
+		LeaguePoints: 45,
+		Wins:         55,
+		Losses:       40,
+	})
+
+	leagueV4Called := false
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "league/v4") {
+			leagueV4Called = true
+		}
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	cfg := CrawlerConfig{
+		RankDB: rankDB,
+	}
+
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if leagueV4Called {
+		t.Errorf("expected League-V4 to NOT be called when RankDB has entry")
+	}
+
+	if !s.HasProfile() || s.RankTier != data.Emerald_1 || s.LeaguePoints != 45 {
+		t.Errorf("expected summoner to have Emerald_1 rank, got RankTier=%v, LP=%d, HasProfile=%v",
+			s.RankTier, s.LeaguePoints, s.HasProfile())
+	}
+}
+
+func TestMatchCrawler_FallsBackToLeagueV4(t *testing.T) {
+	ds := data.NewDataset()
+	s := ds.GetOrCreateSummoner("puuid_2", "Player2")
+	s.SummonerLevel = 80
+	s.RevisionDate = 1700000000000
+	s.ID = "sum_2"
+	s.RankFetched = false
+
+	leagueV4Called := false
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "/lol/league/v4/entries/by-summoner/sum_2") {
+			leagueV4Called = true
+			return jsonResponse(http.StatusOK, []LeagueEntryDto{
+				{
+					QueueType:    "RANKED_SOLO_5x5",
+					Tier:         "GOLD",
+					Rank:         "II",
+					LeaguePoints: 30,
+					Wins:         40,
+					Losses:       35,
+				},
+			})
+		}
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	crawler := NewMatchCrawler(client, ds, nil, CrawlerConfig{})
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if !leagueV4Called {
+		t.Errorf("expected League-V4 to be called when RankDB is not present")
+	}
+
+	if !s.HasProfile() || s.RankTier != data.Gold_2 || s.LeaguePoints != 30 {
+		t.Errorf("expected summoner to have Gold_2 rank, got RankTier=%v, LP=%d, HasProfile=%v",
+			s.RankTier, s.LeaguePoints, s.HasProfile())
+	}
+}
+
+func TestRankDatabase_ResumeIncomplete(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "resume_rank_db.json.gz")
+
+	// 1. Initial partial DB with 1 bracket completed
+	initialDB := NewRankDatabase(dbPath)
+	initialDB.MarkBracketComplete("APEX_CHALLENGER")
+	initialDB.Add(&RankEntry{
+		SummonerID:   "challenger_1",
+		RankTier:     data.Challenger,
+		LeaguePoints: 1000,
+	})
+	if err := initialDB.Save(); err != nil {
+		t.Fatalf("failed saving initial DB: %v", err)
+	}
+
+	if initialDB.IsComplete() {
+		t.Fatalf("expected initial DB to NOT be complete")
+	}
+
+	// 2. Load into new instance
+	loadedDB := NewRankDatabase(dbPath)
+	if err := loadedDB.Load(); err != nil {
+		t.Fatalf("failed loading DB: %v", err)
+	}
+	if !loadedDB.IsBracketComplete("APEX_CHALLENGER") {
+		t.Errorf("expected APEX_CHALLENGER to be marked complete in loaded DB")
+	}
+
+	// 3. Mock client that should only be called for remaining brackets
+	apexChallengerCalled := false
+	apexGrandmasterCalled := false
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "challengerleagues") {
+			apexChallengerCalled = true
+		}
+		if strings.Contains(req.URL.Path, "grandmasterleagues") {
+			apexGrandmasterCalled = true
+			return jsonResponse(http.StatusOK, LeagueListDto{
+				Tier: "GRANDMASTER",
+				Entries: []LeagueItemDto{
+					{SummonerID: "gm_1", LeaguePoints: 600},
+				},
+			})
+		}
+		if strings.Contains(req.URL.Path, "masterleagues") {
+			return jsonResponse(http.StatusOK, LeagueListDto{
+				Tier: "MASTER",
+				Entries: []LeagueItemDto{
+					{SummonerID: "master_1", LeaguePoints: 100},
+				},
+			})
+		}
+		return jsonResponse(http.StatusOK, []LeagueEntryDto{})
+	})
+
+	if err := loadedDB.Build(context.Background(), client, 10, nil); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if apexChallengerCalled {
+		t.Errorf("expected APEX_CHALLENGER to be skipped since it was already complete")
+	}
+	if !apexGrandmasterCalled {
+		t.Errorf("expected APEX_GRANDMASTER to be called during resume")
+	}
+	if !loadedDB.IsComplete() {
+		t.Errorf("expected DB to be complete after finishing all brackets")
+	}
+	if loadedDB.Size() < 2 {
+		t.Errorf("expected at least 2 summoners (challenger_1 + gm_1), got %d", loadedDB.Size())
+	}
+}
+
+func TestMatchCrawler_DecryptionMismatchMarksProfileUnavailable(t *testing.T) {
+	ds := data.NewDataset()
+	s := ds.GetOrCreateSummoner("old_puuid_1", "LegacyPlayer")
+
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "summoners/by-puuid/old_puuid_1") {
+			return jsonResponse(http.StatusBadRequest, map[string]interface{}{
+				"status": map[string]interface{}{
+					"message":     "Bad Request - Exception decrypting old_puuid_1",
+					"status_code": 400,
+				},
+			})
+		}
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	crawler := NewMatchCrawler(client, ds, nil, CrawlerConfig{})
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if !s.PUUIDInvalid {
+		t.Errorf("expected PUUIDInvalid to be true on decryption exception")
+	}
+	if s.HasProfile() {
+		t.Errorf("expected HasProfile to be false since profile data is missing")
+	}
+	if s.NeedsProfile() {
+		t.Errorf("expected NeedsProfile to be false since PUUID is marked invalid")
+	}
+}
+
+func TestMatchCrawler_MigratesPUUIDInvalidViaRiotID(t *testing.T) {
+	ds := data.NewDataset()
+	s := ds.GetOrCreateSummoner("old_encrypted_puuid", "Casanova#NA1")
+	s.PUUIDInvalid = true
+
+	// Also attach a match to verify participant PUUID updates
+	m := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "NA1_123"},
+		Info: data.InfoDto{
+			Participants: []*data.ParticipantDto{
+				{PUUID: "old_encrypted_puuid", SummonerName: "Casanova#NA1"},
+			},
+		},
+	}
+	ds.AddMatch(m)
+
+	accountV1Called := false
+	summonerV4Called := false
+	leagueV4Called := false
+
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(req.URL.Path, "/riot/account/v1/accounts/by-riot-id/Casanova/NA1"):
+			accountV1Called = true
+			return jsonResponse(http.StatusOK, AccountDto{
+				PUUID:    "new_encrypted_puuid",
+				GameName: "Casanova",
+				TagLine:  "NA1",
+			})
+		case strings.Contains(req.URL.Path, "/lol/summoner/v4/summoners/by-puuid/new_encrypted_puuid"):
+			summonerV4Called = true
+			return jsonResponse(http.StatusOK, map[string]interface{}{
+				"puuid":         "new_encrypted_puuid",
+				"id":            "new_summoner_id",
+				"name":          "Casanova#NA1",
+				"summonerLevel": 450,
+			})
+		case strings.Contains(req.URL.Path, "/lol/league/v4/entries/by-summoner/new_summoner_id"):
+			leagueV4Called = true
+			return jsonResponse(http.StatusOK, []LeagueEntryDto{
+				{
+					QueueType:    "RANKED_SOLO_5x5",
+					Tier:         "DIAMOND",
+					Rank:         "I",
+					LeaguePoints: 75,
+					Wins:         120,
+					Losses:       100,
+				},
+			})
+		default:
+			return jsonResponse(http.StatusOK, []string{})
+		}
+	})
+
+	crawler := NewMatchCrawler(client, ds, nil, CrawlerConfig{})
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if !accountV1Called {
+		t.Errorf("expected Account-V1 by-riot-id to be called for invalid PUUID")
+	}
+	if !summonerV4Called {
+		t.Errorf("expected Summoner-V4 to be called for migrated PUUID")
+	}
+	if !leagueV4Called {
+		t.Errorf("expected League-V4 to be called for migrated summoner ID")
+	}
+
+	// Verify summoner state
+	if s.PUUID != "new_encrypted_puuid" {
+		t.Errorf("expected s.PUUID to be updated to new_encrypted_puuid, got %s", s.PUUID)
+	}
+	if s.PUUIDInvalid {
+		t.Errorf("expected s.PUUIDInvalid to be false after migration")
+	}
+	if !s.HasProfile() {
+		t.Errorf("expected s.HasProfile() to be true")
+	}
+	if s.SummonerLevel != 450 {
+		t.Errorf("expected SummonerLevel 450, got %d", s.SummonerLevel)
+	}
+	if s.RankTier != data.Diamond_1 {
+		t.Errorf("expected RankTier Diamond_1, got %v", s.RankTier)
+	}
+	if s.LeaguePoints != 75 {
+		t.Errorf("expected LeaguePoints 75, got %d", s.LeaguePoints)
+	}
+
+	// Verify dataset mapping
+	if ds.GetSummoner("new_encrypted_puuid") != s {
+		t.Errorf("expected ds.GetSummoner(new_encrypted_puuid) to return s")
+	}
+	if ds.GetSummoner("old_encrypted_puuid") != nil {
+		t.Errorf("expected old PUUID to no longer exist in PUUIDToSummoner")
+	}
+
+	// Verify match participant PUUID update
+	if m.Info.Participants[0].PUUID != "new_encrypted_puuid" {
+		t.Errorf("expected match participant PUUID to be updated to new_encrypted_puuid, got %s", m.Info.Participants[0].PUUID)
+	}
+}
+
+func TestMatchCrawler_SkipsProfileSyncWhenConfigured(t *testing.T) {
+	ds := data.NewDataset()
+	s1 := ds.GetOrCreateSummoner("seed_puuid", "SeedPlayer#NA1")
+	s2 := ds.GetOrCreateSummoner("other_puuid", "OtherPlayer#NA1")
+	s2.Crawled = true // marked crawled so it's not in the queue
+
+	otherProfileFetched := false
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "by-puuid/other_puuid") {
+			otherProfileFetched = true
+		}
+		if strings.Contains(req.URL.Path, "by-puuid/seed_puuid/ids") {
+			return jsonResponse(http.StatusOK, []string{})
+		}
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	cfg := CrawlerConfig{
+		SeedPUUID:       "seed_puuid",
+		SkipProfileSync: true,
+	}
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+	if err := crawler.Run(context.Background()); err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	if otherProfileFetched {
+		t.Errorf("expected other_puuid profile to NOT be fetched upfront when SkipProfileSync is true")
+	}
+	if !s1.Crawled {
+		t.Errorf("expected seed_puuid to be crawled")
+	}
+}
+
+
+
+
 
 

@@ -1,5 +1,7 @@
 package data
 
+import "strings"
+
 // DefaultSummonerEmbeddingDim is the default dimensionality for summoner dynamic embeddings.
 const DefaultSummonerEmbeddingDim = 64
 
@@ -17,6 +19,9 @@ type Dataset struct {
 	// PUUIDToSummoner indexes summoners by their PUUID (or OE player ID).
 	PUUIDToSummoner map[string]*SummonerV4 `json:"-"`
 
+	// RiotIDToSummoner indexes summoners by their lowercase Riot ID ("gameName#tagLine") or summoner name.
+	RiotIDToSummoner map[string]*SummonerV4 `json:"-"`
+
 	// MatchIDToMatch indexes matches by their unique match/game ID.
 	MatchIDToMatch map[string]*MatchV5 `json:"-"`
 
@@ -33,18 +38,48 @@ type Dataset struct {
 // NewDataset initializes and returns an empty Dataset.
 func NewDataset() *Dataset {
 	return &Dataset{
-		Matches:         make([]*MatchV5, 0),
-		Summoners:       make([]*SummonerV4, 0),
-		PUUIDToSummoner: make(map[string]*SummonerV4),
-		MatchIDToMatch:  make(map[string]*MatchV5),
+		Matches:          make([]*MatchV5, 0),
+		Summoners:        make([]*SummonerV4, 0),
+		PUUIDToSummoner:  make(map[string]*SummonerV4),
+		MatchIDToMatch:   make(map[string]*MatchV5),
+		RiotIDToSummoner: make(map[string]*SummonerV4),
+	}
+}
+
+// ensureIndexes guarantees that internal lookup maps are initialized and populated.
+func (d *Dataset) ensureIndexes() {
+	if d.PUUIDToSummoner == nil {
+		d.PUUIDToSummoner = make(map[string]*SummonerV4, len(d.Summoners))
+		for _, s := range d.Summoners {
+			if s != nil && s.PUUID != "" {
+				d.PUUIDToSummoner[s.PUUID] = s
+			}
+		}
+	}
+	if d.RiotIDToSummoner == nil {
+		d.RiotIDToSummoner = make(map[string]*SummonerV4, len(d.Summoners))
+		for _, s := range d.Summoners {
+			if s != nil && s.Name != "" && strings.Contains(s.Name, "#") && !strings.HasPrefix(s.PUUID, "oe:") {
+				key := strings.ToLower(strings.TrimSpace(s.Name))
+				if existing, exists := d.RiotIDToSummoner[key]; !exists || (existing.PUUIDInvalid && !s.PUUIDInvalid) {
+					d.RiotIDToSummoner[key] = s
+				}
+			}
+		}
+	}
+	if d.MatchIDToMatch == nil {
+		d.MatchIDToMatch = make(map[string]*MatchV5, len(d.Matches))
+		for _, m := range d.Matches {
+			if m != nil && m.Metadata.MatchID != "" {
+				d.MatchIDToMatch[m.Metadata.MatchID] = m
+			}
+		}
 	}
 }
 
 // GetSummoner looks up a summoner by PUUID. Returns nil if not found.
 func (d *Dataset) GetSummoner(puuid string) *SummonerV4 {
-	if d.PUUIDToSummoner == nil {
-		return nil
-	}
+	d.ensureIndexes()
 	return d.PUUIDToSummoner[puuid]
 }
 
@@ -78,24 +113,36 @@ func (d *Dataset) NumSummonersWithProfile() int {
 
 // GetMatch looks up a match by its MatchID. Returns nil if not found.
 func (d *Dataset) GetMatch(matchID string) *MatchV5 {
-	if d.MatchIDToMatch == nil {
-		return nil
-	}
+	d.ensureIndexes()
 	return d.MatchIDToMatch[matchID]
 }
 
 // GetOrCreateSummoner retrieves an existing summoner or creates and registers a new one.
+// If puuid is not yet indexed, but a summoner with the same Riot ID (GameName#TagLine) already exists
+// in the dataset (e.g. from an earlier crawl before API key migration), it automatically migrates and merges
+// the existing summoner into the new PUUID.
 func (d *Dataset) GetOrCreateSummoner(puuid, name string) *SummonerV4 {
-	if d.PUUIDToSummoner == nil {
-		d.PUUIDToSummoner = make(map[string]*SummonerV4)
-	}
+	d.ensureIndexes()
 
 	if s, exists := d.PUUIDToSummoner[puuid]; exists {
 		if s.Name == "" && name != "" {
 			s.Name = name
+			if strings.Contains(name, "#") && !strings.HasPrefix(puuid, "oe:") {
+				d.RiotIDToSummoner[strings.ToLower(strings.TrimSpace(name))] = s
+			}
 			d.Saved = false
 		}
 		return s
+	}
+
+	normName := strings.ToLower(strings.TrimSpace(name))
+	if strings.Contains(normName, "#") && !strings.HasPrefix(puuid, "oe:") {
+		if existing, exists := d.RiotIDToSummoner[normName]; exists && existing != nil {
+			if existing.PUUID != puuid {
+				return d.UpdateSummonerPUUID(existing, puuid)
+			}
+			return existing
+		}
 	}
 
 	s := &SummonerV4{
@@ -105,6 +152,86 @@ func (d *Dataset) GetOrCreateSummoner(puuid, name string) *SummonerV4 {
 	}
 	d.Summoners = append(d.Summoners, s)
 	d.PUUIDToSummoner[puuid] = s
+	if strings.Contains(normName, "#") && !strings.HasPrefix(puuid, "oe:") {
+		d.RiotIDToSummoner[normName] = s
+	}
+	d.Saved = false
+	return s
+}
+
+// UpdateSummonerPUUID updates a summoner's PUUID from old to new.
+// It re-indexes PUUIDToSummoner and RiotIDToSummoner, clears PUUIDInvalid, and updates participant PUUID references
+// across all matches for this summoner. If a summoner with newPUUID already exists, their
+// match histories are merged and the resulting summoner pointer is returned.
+func (d *Dataset) UpdateSummonerPUUID(s *SummonerV4, newPUUID string) *SummonerV4 {
+	if d == nil || s == nil || newPUUID == "" || s.PUUID == newPUUID {
+		return s
+	}
+	d.ensureIndexes()
+	oldPUUID := s.PUUID
+
+	// If target newPUUID already exists in dataset, merge s into existing
+	if existing, exists := d.PUUIDToSummoner[newPUUID]; exists && existing != s {
+		delete(d.PUUIDToSummoner, oldPUUID)
+		for _, m := range s.Matches {
+			existing.AddMatch(m)
+			if m != nil && m.Info.Participants != nil {
+				for _, p := range m.Info.Participants {
+					if p != nil && p.PUUID == oldPUUID {
+						p.PUUID = newPUUID
+						p.Summoner = existing
+					}
+				}
+			}
+		}
+		if !existing.Crawled && s.Crawled {
+			existing.Crawled = true
+		}
+		if !existing.HasProfile() && s.HasProfile() {
+			existing.SummonerLevel = s.SummonerLevel
+			existing.ProfileIconID = s.ProfileIconID
+			existing.RevisionDate = s.RevisionDate
+			existing.ID = s.ID
+			existing.AccountID = s.AccountID
+			existing.RankTier = s.RankTier
+			existing.LeaguePoints = s.LeaguePoints
+			existing.RankWins = s.RankWins
+			existing.RankLosses = s.RankLosses
+			existing.RankFetched = s.RankFetched
+		}
+		if existing.Name == "" && s.Name != "" {
+			existing.Name = s.Name
+		}
+		if existing.Name != "" && strings.Contains(existing.Name, "#") && !strings.HasPrefix(existing.PUUID, "oe:") {
+			d.RiotIDToSummoner[strings.ToLower(strings.TrimSpace(existing.Name))] = existing
+		}
+		for i, sum := range d.Summoners {
+			if sum == s {
+				d.Summoners = append(d.Summoners[:i], d.Summoners[i+1:]...)
+				break
+			}
+		}
+		d.Saved = false
+		return existing
+	}
+
+	delete(d.PUUIDToSummoner, oldPUUID)
+	s.PUUID = newPUUID
+	s.PUUIDInvalid = false
+	d.PUUIDToSummoner[newPUUID] = s
+	if s.Name != "" && strings.Contains(s.Name, "#") && !strings.HasPrefix(newPUUID, "oe:") {
+		d.RiotIDToSummoner[strings.ToLower(strings.TrimSpace(s.Name))] = s
+	}
+
+	for _, m := range s.Matches {
+		if m != nil && m.Info.Participants != nil {
+			for _, p := range m.Info.Participants {
+				if p != nil && p.PUUID == oldPUUID {
+					p.PUUID = newPUUID
+				}
+			}
+		}
+	}
 	d.Saved = false
 	return s
 }

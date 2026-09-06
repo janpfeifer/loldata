@@ -26,9 +26,12 @@ var (
 	apiKeyFlag        = flag.String("api_key", "", "Riot API Key (defaults to RIOT_API_KEY or RIOT_TOKEN environment variable)")
 	platformFlag      = flag.String("platform", "na1", "Riot platform routing (e.g. 'na1', 'euw1', 'kr', 'br1', etc.)")
 	maxMatchesFlag    = flag.Int("max_matches", 0, "Maximum number of new matches to crawl (0 for unlimited)")
-	refreshFlag        = flag.Bool("refresh", false, "Mark all loaded summoners as uncrawled at startup to re-crawl their match histories")
-	clearNonRankedFlag = flag.Bool("clear_non_ranked", false, "Remove non-ranked matches and orphaned summoners with no matches from dataset")
-	verboseFlag        = flag.Bool("verbose", false, "Enable verbose debug output")
+	refreshFlag         = flag.Bool("refresh", false, "Mark all loaded summoners as uncrawled at startup to re-crawl their match histories")
+	clearNonRankedFlag  = flag.Bool("clear_non_ranked", false, "Remove non-ranked matches and orphaned summoners with no matches from dataset")
+	rankDBFlag          = flag.String("rank_db", "", "Path to RankDatabase file to read/create with bulk summoners per rank (e.g. rank_db.json.gz)")
+	maxPerRankFlag      = flag.Int("rank_db_max_per_rank", 200000, "Maximum summoners to crawl per rank bracket when building rank_db")
+	skipProfileSyncFlag = flag.Bool("skip_profile_sync", false, "Skip upfront crawling of missing summoner profiles")
+	verboseFlag         = flag.Bool("verbose", false, "Enable verbose debug output")
 )
 
 func main() {
@@ -74,6 +77,14 @@ func main() {
 	if strings.HasPrefix(datasetPath, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			datasetPath = filepath.Join(home, datasetPath[2:])
+		}
+	}
+
+	// Expand rankDB path if starting with ~/
+	rankDBPath := strings.TrimSpace(*rankDBFlag)
+	if strings.HasPrefix(rankDBPath, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			rankDBPath = filepath.Join(home, rankDBPath[2:])
 		}
 	}
 
@@ -129,7 +140,39 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// 7. Resolve seed if provided
+	// 7. Initialize or Build RankDatabase if configured
+	var rankDB *RankDatabase
+	if rankDBPath != "" {
+		rankDB = NewRankDatabase(rankDBPath)
+		if rankDB.Exists() {
+			fmt.Printf("Loading existing RankDatabase from %s ...\n", rankDBPath)
+			if err := rankDB.Load(); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to load existing RankDatabase %q: %v\n", rankDBPath, err)
+			} else {
+				fmt.Printf("Loaded RankDatabase with %d summoner entries (%d/%d brackets completed).\n",
+					rankDB.Size(), len(rankDB.CompletedBrackets), TotalBracketsCount)
+			}
+		}
+
+		if !rankDB.IsComplete() {
+			if rankDB.Exists() {
+				fmt.Printf("Resuming RankDatabase build (%d/%d brackets completed, %d summoners)...\n",
+					len(rankDB.CompletedBrackets), TotalBracketsCount, rankDB.Size())
+			} else {
+				fmt.Printf("RankDatabase %q not found. Building new rank database...\n", rankDBPath)
+			}
+			if err := rankDB.Build(ctx, client, *maxPerRankFlag, func() {
+				_ = rankDB.Save()
+			}); err != nil {
+				if err == context.Canceled {
+					return
+				}
+				fmt.Fprintf(os.Stderr, "Error building RankDatabase: %v\n", err)
+			}
+		}
+	}
+
+	// 8. Resolve seed if provided
 	var seedPUUID string
 	if *seedFlag != "" {
 		fmt.Printf("Resolving seed summoner %q on platform %s ...\n", *seedFlag, *platformFlag)
@@ -145,7 +188,7 @@ func main() {
 		fmt.Printf("Resolved seed %q -> PUUID: %s\n", *seedFlag, seedPUUID)
 	}
 
-	// 8. Setup Crawler
+	// 9. Setup Crawler
 	crawlerCfg := CrawlerConfig{
 		StartTime:          startTime,
 		EndTime:            endTime,
@@ -155,6 +198,8 @@ func main() {
 		SeedPUUID:          seedPUUID,
 		Refresh:            *refreshFlag,
 		ClearNonRanked:     *clearNonRankedFlag,
+		RankDB:             rankDB,
+		SkipProfileSync:    *skipProfileSyncFlag,
 	}
 	if *clearNonRankedFlag {
 		removedMatches, removedSummoners := dataset.ClearNonRanked()
