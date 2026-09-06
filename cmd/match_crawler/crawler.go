@@ -885,11 +885,6 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 				continue
 			}
 
-			// Immediately retrieve Summoner profile and rank info for all participants of this match
-			if err := c.fetchMissingParticipantProfiles(ctx, match); err != nil {
-				return err
-			}
-
 			fetchedMatches = append(fetchedMatches, match)
 			c.printCrawlProgress()
 		}
@@ -898,6 +893,13 @@ func (c *MatchCrawler) Run(ctx context.Context) error {
 			// If we failed to crawl all matches for this summoner, do not add partial matches
 			// and do not mark as crawled, so the summoner can be crawled cleanly on retry/restart.
 			continue
+		}
+
+		// Immediately retrieve Summoner profile and rank info for all participants of fetched matches
+		for _, match := range fetchedMatches {
+			if err := c.fetchMissingParticipantProfiles(ctx, match); err != nil {
+				return err
+			}
 		}
 
 		// Atomically add matches to dataset, mark summoner as crawled, and enqueue new participants
