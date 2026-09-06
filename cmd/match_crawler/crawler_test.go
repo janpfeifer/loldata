@@ -1183,6 +1183,109 @@ func TestMatchCrawler_MigratesPUUIDInvalidViaRiotID(t *testing.T) {
 	}
 }
 
+func TestMatchCrawler_MigratesPUUIDViaMatchGreedyCover(t *testing.T) {
+	ds := data.NewDataset()
+	s1 := ds.GetOrCreateSummoner("old_p1", "Player1#NA1")
+	s1.PUUIDInvalid = true
+	s2 := ds.GetOrCreateSummoner("old_p2", "Player2#NA1")
+	s2.PUUIDInvalid = true
+
+	m := &data.MatchV5{
+		Metadata: data.MetadataDto{MatchID: "NA1_555"},
+		Info: data.InfoDto{
+			Participants: []*data.ParticipantDto{
+				{PUUID: "old_p1", SummonerName: "Player1#NA1", RiotIDGameName: "Player1", RiotIDTagline: "NA1"},
+				{PUUID: "old_p2", SummonerName: "Player2#NA1", RiotIDGameName: "Player2", RiotIDTagline: "NA1"},
+			},
+		},
+	}
+	ds.AddMatch(m)
+
+	rankDB := NewRankDatabase("")
+	rankDB.Add(&RankEntry{
+		PUUID:        "new_p1",
+		RankTier:     data.Master,
+		LeaguePoints: 120,
+		Wins:         150,
+		Losses:       110,
+	})
+	rankDB.Add(&RankEntry{
+		PUUID:        "new_p2",
+		RankTier:     data.GrandMaster,
+		LeaguePoints: 340,
+		Wins:         200,
+		Losses:       150,
+	})
+
+	matchV5Called := false
+	accountV1Called := false
+
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case strings.Contains(req.URL.Path, "/lol/match/v5/matches/NA1_555"):
+			matchV5Called = true
+			return jsonResponse(http.StatusOK, &data.MatchV5{
+				Metadata: data.MetadataDto{MatchID: "NA1_555"},
+				Info: data.InfoDto{
+					Participants: []*data.ParticipantDto{
+						{PUUID: "new_p1", RiotIDGameName: "Player1", RiotIDTagline: "NA1"},
+						{PUUID: "new_p2", RiotIDGameName: "Player2", RiotIDTagline: "NA1"},
+					},
+				},
+			})
+		case strings.Contains(req.URL.Path, "riot/account/v1"):
+			accountV1Called = true
+			return jsonResponse(http.StatusOK, []string{})
+		default:
+			return jsonResponse(http.StatusOK, []string{})
+		}
+	})
+
+	cfg := CrawlerConfig{
+		RankDB: rankDB,
+	}
+
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if !matchV5Called {
+		t.Errorf("expected Match-V5 to be called for bulk migration")
+	}
+	if accountV1Called {
+		t.Errorf("expected Account-V1 to NOT be called since Match-V5 resolved all players")
+	}
+
+	// Check s1
+	if s1.PUUID != "new_p1" {
+		t.Errorf("expected s1 PUUID to be new_p1, got %s", s1.PUUID)
+	}
+	if s1.PUUIDInvalid {
+		t.Errorf("expected s1 PUUIDInvalid to be false")
+	}
+	if !s1.HasProfile() || s1.RankTier != data.Master || s1.LeaguePoints != 120 {
+		t.Errorf("expected s1 to have Master 120 LP, got %v %d LP, HasProfile=%v", s1.RankTier, s1.LeaguePoints, s1.HasProfile())
+	}
+
+	// Check s2
+	if s2.PUUID != "new_p2" {
+		t.Errorf("expected s2 PUUID to be new_p2, got %s", s2.PUUID)
+	}
+	if s2.PUUIDInvalid {
+		t.Errorf("expected s2 PUUIDInvalid to be false")
+	}
+	if !s2.HasProfile() || s2.RankTier != data.GrandMaster || s2.LeaguePoints != 340 {
+		t.Errorf("expected s2 to have GrandMaster 340 LP, got %v %d LP, HasProfile=%v", s2.RankTier, s2.LeaguePoints, s2.HasProfile())
+	}
+
+	// Verify match participants updated
+	if m.Info.Participants[0].PUUID != "new_p1" || m.Info.Participants[1].PUUID != "new_p2" {
+		t.Errorf("expected match participants updated to new PUUIDs, got %s, %s",
+			m.Info.Participants[0].PUUID, m.Info.Participants[1].PUUID)
+	}
+}
+
 func TestMatchCrawler_SkipsProfileSyncWhenConfigured(t *testing.T) {
 	ds := data.NewDataset()
 	s1 := ds.GetOrCreateSummoner("seed_puuid", "SeedPlayer#NA1")
