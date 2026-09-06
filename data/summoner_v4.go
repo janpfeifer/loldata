@@ -63,12 +63,13 @@ type SummonerV4 struct {
 	Matches []*MatchV5 `json:"-"`
 }
 
-// HasProfile returns true if the summoner has complete Summoner-V4 profile information and rank information.
+// HasProfile returns true if the summoner has complete Summoner-V4 profile information and rank information,
+// or if their rank profile has been matched (e.g. from a rank database).
 func (s *SummonerV4) HasProfile() bool {
 	if s == nil {
 		return false
 	}
-	return (s.SummonerLevel > 0 || s.RevisionDate > 0) && s.RankFetched
+	return (s.SummonerLevel > 0 || s.RevisionDate > 0 || s.RankTier != RankUnknown) && s.RankFetched
 }
 
 // NeedsProfile returns true if the summoner is missing profile information

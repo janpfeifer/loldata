@@ -315,6 +315,33 @@ func (c *MatchCrawler) migrateSummonerPUUID(ctx context.Context, s *data.Summone
 // and rank details for all summoners in the dataset that do not have complete profile information yet.
 // If any summoner has PUUIDInvalid (e.g. from an API key migration), it resolves their new PUUID via Riot ID first.
 func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
+	// 0. Upfront match against RankDatabase for all summoners missing a profile
+	if c.rankDB != nil {
+		c.mu.Lock()
+		matchedRankDB := 0
+		for _, s := range c.dataset.Summoners {
+			if s == nil || s.PUUID == "" || strings.HasPrefix(s.PUUID, "oe:") {
+				continue
+			}
+			if !s.HasProfile() {
+				if entry := c.rankDB.Lookup(s.ID, s.PUUID); entry != nil {
+					s.RankTier = entry.RankTier
+					s.LeaguePoints = entry.LeaguePoints
+					s.RankWins = entry.Wins
+					s.RankLosses = entry.Losses
+					s.RankFetched = true
+					if s.ID == "" && entry.SummonerID != "" {
+						s.ID = entry.SummonerID
+					}
+					c.dataset.Saved = false
+					matchedRankDB++
+				}
+			}
+		}
+		c.mu.Unlock()
+		fmt.Printf("Matched %d summoners without profile from rank_db upfront.\n", matchedRankDB)
+	}
+
 	c.mu.Lock()
 	var toUpdate []*data.SummonerV4
 	for _, s := range c.dataset.Summoners {
@@ -384,6 +411,8 @@ func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
 		default:
 		}
 
+		profileUpdated := false
+
 		// 1. Update PUUID if it is marked invalid (migrate using Riot ID)
 		if s.PUUIDInvalid {
 			migrated, err := c.migrateSummonerPUUID(ctx, s)
@@ -404,11 +433,26 @@ func (c *MatchCrawler) fetchMissingSummonerProfiles(ctx context.Context) error {
 			} else if migrated != nil {
 				s = migrated
 				migratedPUUIDCount++
+				if c.rankDB != nil && !s.HasProfile() {
+					if entry := c.rankDB.Lookup(s.ID, s.PUUID); entry != nil {
+						c.mu.Lock()
+						s.RankTier = entry.RankTier
+						s.LeaguePoints = entry.LeaguePoints
+						s.RankWins = entry.Wins
+						s.RankLosses = entry.Losses
+						s.RankFetched = true
+						if s.ID == "" && entry.SummonerID != "" {
+							s.ID = entry.SummonerID
+						}
+						c.dataset.Saved = false
+						profileUpdated = true
+						c.mu.Unlock()
+					}
+				}
 			}
 		}
 
 		// 2. Download profile if needed
-		profileUpdated := false
 		if !s.PUUIDInvalid && !s.ProfileUnavailable && s.NeedsProfile() {
 			if s.SummonerLevel == 0 && s.RevisionDate == 0 {
 				profile, err := c.client.GetSummonerByPUUID(ctx, s.PUUID)
@@ -572,6 +616,19 @@ func (c *MatchCrawler) fetchMissingParticipantProfiles(ctx context.Context, matc
 			}
 		}
 		s = c.dataset.GetOrCreateSummoner(p.PUUID, name)
+		if c.rankDB != nil && !s.HasProfile() {
+			if entry := c.rankDB.Lookup(s.ID, s.PUUID); entry != nil {
+				s.RankTier = entry.RankTier
+				s.LeaguePoints = entry.LeaguePoints
+				s.RankWins = entry.Wins
+				s.RankLosses = entry.Losses
+				s.RankFetched = true
+				if s.ID == "" && entry.SummonerID != "" {
+					s.ID = entry.SummonerID
+				}
+				c.dataset.Saved = false
+			}
+		}
 		needLevel := s.SummonerLevel == 0 && s.RevisionDate == 0
 		needRank := !s.RankFetched
 		c.mu.Unlock()

@@ -931,6 +931,49 @@ func TestMatchCrawler_FallsBackToLeagueV4(t *testing.T) {
 	}
 }
 
+func TestMatchCrawler_UpfrontRankDBMatchesWithoutAPI(t *testing.T) {
+	ds := data.NewDataset()
+	// Summoner has no profile or rank at all
+	s := ds.GetOrCreateSummoner("puuid_upfront", "PlayerUpfront")
+	s.RankFetched = false
+	s.SummonerLevel = 0
+	s.RevisionDate = 0
+
+	rankDB := NewRankDatabase("")
+	rankDB.Add(&RankEntry{
+		SummonerID:   "sum_upfront",
+		PUUID:        "puuid_upfront",
+		RankTier:     data.Platinum_2,
+		LeaguePoints: 75,
+		Wins:         60,
+		Losses:       45,
+	})
+
+	apiCalled := false
+	client := newMockRiotClient(func(req *http.Request) (*http.Response, error) {
+		apiCalled = true
+		return jsonResponse(http.StatusOK, []string{})
+	})
+
+	cfg := CrawlerConfig{
+		RankDB: rankDB,
+	}
+
+	crawler := NewMatchCrawler(client, ds, nil, cfg)
+	if err := crawler.fetchMissingSummonerProfiles(context.Background()); err != nil {
+		t.Fatalf("fetchMissingSummonerProfiles failed: %v", err)
+	}
+
+	if apiCalled {
+		t.Errorf("expected no Riot API calls to be made when player is matched from RankDB upfront")
+	}
+
+	if !s.HasProfile() || s.RankTier != data.Platinum_2 || s.LeaguePoints != 75 || s.ID != "sum_upfront" {
+		t.Errorf("expected summoner to have Platinum_2 rank and ID set, got RankTier=%v, LP=%d, ID=%s, HasProfile=%v",
+			s.RankTier, s.LeaguePoints, s.ID, s.HasProfile())
+	}
+}
+
 func TestRankDatabase_ResumeIncomplete(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "resume_rank_db.json.gz")
