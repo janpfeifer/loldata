@@ -107,7 +107,7 @@ loldata/
 ### `cmd/match_crawler/`
 - Crawls League of Legends matches and summoners using Riot Match-V5 and Summoner-V4 APIs.
 - Flags:
-  - `-dataset`: Target dataset JSON file path (loaded at startup, saved on checkpoint/exit).
+  - `-dataset`: Target dataset JSON/Gob file path (loaded at startup, saved on checkpoint/exit).
   - `-checkpoints`: Periodic save interval (default `10m`).
   - `-backups`: Rotating backup count (default `3`, saved to `<file>.backup-YYYYMMDDhhmmss`).
   - `-start_time`: Match start filter (default `1w` ago).
@@ -117,6 +117,31 @@ loldata/
   - `-seed`: Initial summoner name or Riot ID (e.g. `Faker#KR1`).
   - `-api_key`: Riot API key (or `RIOT_API_KEY` / `RIOT_TOKEN` env var).
   - `-platform`: Platform routing (default `na1`).
+  - `-rank_db`: Path to cached RankDatabase file (e.g. `rank_db.json.gz`).
+  - `-skip_profile_sync`: Skip upfront crawling of missing summoner profiles.
+
+#### API Limitations & Rate Bottlenecks
+- Riot developer application API keys are strictly throttled (typically 20 reqs/sec and 100 reqs/2 min, or production limits around 200 reqs/2 min, ~0.8–1.6 req/s).
+- Querying individual player endpoints (`Summoner-V4` by PUUID, `League-V4` by SummonerID, or `Account-V1` by Riot ID) for 150K+ summoners would require ~150,000+ individual requests and take 50+ hours.
+- To circumvent this, `loldata` relies on batching whenever possible:
+  - **`RankDatabase` (`rank_db.go`)**: Pre-crawls competitive ladders in bulk (Apex leagues + 205 summoners/page for standard tiers), caching millions of player ranks and LPs in compressed JSON (`.json.gz`).
+  - At startup or when participants are discovered, `match_crawler` resolves ranks from `rank_db` in-memory without making individual API requests.
+
+#### Player Profiles & Rank Requirements
+- Matches cannot be effectively utilized for model training and analysis without complete player profiles (specifically competitive rank tier and LP).
+- A summoner is considered to have a complete profile (`s.HasProfile()`) if their rank tier is known and fetched (`s.RankFetched`), or if their `SummonerLevel` / `RevisionDate` are populated.
+- Matching against `rank_db` satisfies this requirement immediately, bypassing network calls to `Summoner-V4` and `League-V4`.
+
+#### PUUID Encryption & Application Key Invalidation
+- In Riot's API, **both PUUID and SummonerID are encrypted using a secret key tied to your specific Riot Developer Application / Project**.
+- If the developer project changes or the user regenerates their application key context, all existing PUUIDs in the dataset become invalid:
+  - Riot returns `HTTP 400 Bad Request` with an encryption mismatch when querying by old PUUID.
+  - Old PUUIDs will also fail to match new PUUIDs in `rank_db`.
+- To recover without discarding dataset match history, `match_crawler` includes migration logic (`puuid_migration.go`):
+  1. **Upfront `rank_db` Pass**: Matches any valid existing PUUIDs without network calls.
+  2. **Greedy Match-V5 Re-retrieval**: Instead of calling `Account-V1` individually (~150,000 requests), re-fetching a match by Match ID from Riot Match-V5 returns the newly encrypted PUUIDs for all 10 participants at once. Using a greedy set cover (prioritizing matches containing the most unmigrated players), ~150K players can be migrated in only ~15K–20K match requests (~5–6 hours instead of 50+ hours).
+  3. **Immediate RankDB Lookup**: As each participant's new PUUID is retrieved, it is immediately matched against `rank_db` to set their rank and complete their profile.
+  4. **Fallback Migration via Riot ID**: Any orphaned players not covered by matches can be migrated individually via `Account-V1` (`GetAccountByRiotID`).
 
 ### `cmd/stats/main.go`
 - Accepts `-oe <files>`, `-json <files>`, `-summoner <name|puuid>`, `-save-json <out.json>` or positional arguments.
